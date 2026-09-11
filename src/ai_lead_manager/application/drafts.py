@@ -1,4 +1,4 @@
-from typing import Protocol
+from typing import Annotated, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -6,12 +6,12 @@ from pydantic import BaseModel, ConfigDict, Field
 class DraftContext(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    customer_name: str
-    task: str | None
-    summary: str | None
+    customer_name: str = Field(max_length=200)
+    task: str | None = Field(default=None, max_length=5_000)
+    summary: str | None = Field(default=None, max_length=10_000)
     budget_amount: float | None
-    budget_currency: str | None
-    deadline: str | None
+    budget_currency: Annotated[str, Field(min_length=3, max_length=3)] | None
+    deadline: str | None = Field(default=None, max_length=200)
 
 
 class DraftResult(BaseModel):

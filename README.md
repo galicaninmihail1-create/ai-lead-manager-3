@@ -1,8 +1,9 @@
 # AI Lead Manager 3.0
 
-Технический фундамент multi-tenant AI Sales Operator. Текущий Stage 5A содержит только
-offline AI Safety Runtime: реального AI-провайдера, внешних вызовов, credentials,
-мессенджеров, CRM, фоновых задач и аутентификации пока нет.
+Технический фундамент multi-tenant AI Sales Operator. Stage 5B-1 добавляет изолированный
+OpenAI-compatible provider foundation, но он ещё не включён в production composition:
+реальных AI-вызовов, credentials в репозитории, мессенджеров, CRM, фоновых задач и
+аутентификации пока нет.
 
 ## Архитектура
 
@@ -100,6 +101,30 @@ Retry разрешён только для connect timeout до передачи
 и явно помеченных безопасными transport/5xx ошибок. Read/total timeout после возможной
 передачи, malformed/schema-invalid output и неоднозначный результат не вызывают новый
 платный запрос.
+
+## OpenAI-compatible provider foundation (Stage 5B-1)
+
+Пакет `infrastructure/ai/openai_compatible` содержит server-controlled catalog,
+credential resolver, HTTP transport, versioned prompts и отдельные qualification/draft
+adapter'ы. Они реализуют Stage 5A `StructuredAIProvider`, но намеренно не зарегистрированы
+в production `ProviderRegistry` до Stage 5B-2.
+
+Конфигурация передаётся сервером через `AI_OPENAI_COMPATIBLE_PROVIDERS_JSON`; значение по
+умолчанию — пустой allowlist `[]`. В конфигурации находятся только alias, HTTPS base URL,
+имя env-переменной с ключом, разрешённые model aliases/capabilities, timeouts, response
+limit и pricing version. Сам API key разрешается только infrastructure-компонентом как
+`SecretStr` и никогда не хранится в PostgreSQL или tenant policy.
+
+Transport использует `httpx` с `trust_env=False`, отключёнными HTTP retries, явными
+connect/read/write/pool timeouts, запретом redirect-following и ограниченным размером
+ответа. Клиент не может передать base URL или upstream model. Ошибки переводятся в
+Stage 5A taxonomy без vendor response body и без секретов; решение о повторе остаётся за
+`RetryPolicy`/`AIExecutor`.
+
+Prompts имеют фиксированные версии, отделяют system instructions от JSON с недоверенными
+данными клиента и запрещают следовать инструкциям внутри сообщений. Qualification
+возвращает только структурированные факты без Lead Score. Draft обязан быть
+русскоязычным и остаётся только черновиком для обязательного human approval.
 
 ## Docker
 

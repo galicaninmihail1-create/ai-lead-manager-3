@@ -62,6 +62,7 @@ class ProviderMetadata(BaseModel):
 
     provider: str = Field(min_length=1, max_length=100)
     model: str = Field(min_length=1, max_length=100)
+    provider_model: str | None = Field(default=None, min_length=1, max_length=200)
     provider_request_id: str | None = Field(default=None, max_length=255)
     finish_reason: str | None = Field(default=None, max_length=100)
 

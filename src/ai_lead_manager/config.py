@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     ai_max_input_chars: int = Field(default=20_000, ge=100, le=200_000)
     ai_max_input_tokens: int = Field(default=8_000, ge=100, le=100_000)
     ai_max_output_tokens: int = Field(default=1_000, ge=1, le=20_000)
+    ai_openai_compatible_providers_json: str = "[]"
 
 
 @lru_cache
