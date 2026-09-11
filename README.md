@@ -1,7 +1,8 @@
 # AI Lead Manager 3.0
 
-Технический фундамент multi-tenant AI Sales Operator. Этот этап намеренно не содержит AI,
-мессенджеров, CRM, фоновых задач, аутентификации или платных интеграций.
+Технический фундамент multi-tenant AI Sales Operator. Текущий Stage 5A содержит только
+offline AI Safety Runtime: реального AI-провайдера, внешних вызовов, credentials,
+мессенджеров, CRM, фоновых задач и аутентификации пока нет.
 
 ## Архитектура
 
@@ -9,6 +10,12 @@
 - `application` — сценарии использования, схемы и repository-порты;
 - `infrastructure` — PostgreSQL/SQLAlchemy и реализации репозиториев;
 - `api` — HTTP transport на FastAPI.
+
+Модуль `application/ai` владеет provider-neutral контрактами, pricing, idempotency,
+spending guard, retry-решениями и circuit breaker. `infrastructure/ai` содержит
+SQLAlchemy-репозиторий и полностью локальный recording provider. Будущий HTTP adapter
+реального провайдера должен находиться в `infrastructure/ai`, не протекая vendor-типами
+в application/domain.
 
 Tenant-scoped репозитории требуют `tenant_id`, фильтруют по нему чтения и отвергают запись сущности
 другого tenant. Составные foreign keys обеспечивают tenant-consistency связей также на уровне БД.
@@ -51,6 +58,49 @@ HTTP endpoints:
 Все запросы принимают `tenant_id`; repository-слой фильтрует чтения по tenant, а
 составные foreign keys блокируют cross-tenant связи на уровне PostgreSQL.
 
+## AI Safety Runtime (Stage 5A)
+
+Режим по умолчанию — `MOCK`. Даже если tenant policy переключена в `LIVE`, вызов
+fail-closed: одновременно требуются trusted `TenantContext`, глобальные
+`AI_EXECUTION_MODE=LIVE` и `ALLOW_LIVE_AI=true`, разрешённая пара provider/model и
+известная серверу версия цены. На этом этапе LIVE provider намеренно отсутствует.
+`AI_KILL_SWITCH=true` немедленно запрещает новые AI-операции.
+
+Для безопасного пути qualification/draft передаётся обязательный idempotency key.
+Development endpoints сохраняют прежний локальный mock-путь без ключа для обратной
+совместимости; этот путь не способен вызвать платного провайдера. Один и тот же ключ и
+request hash переиспользуют сохранённый результат, другой hash даёт conflict, а
+`CALLING`/`UNKNOWN` никогда не запускаются повторно автоматически.
+
+Денежные значения хранятся только целыми micro-USD. Перед вызовом tenant policy
+блокируется `SELECT ... FOR UPDATE`, рассчитывается сумма actual + reserved за текущий
+месяц и атомарно резервируется worst-case стоимость input/output и разрешённых попыток.
+При неизвестной цене вызов запрещается. Для `UNKNOWN` резерв сохраняется до будущего
+ручного reconciliation.
+
+Граница транзакций намеренно трёхчастная:
+
+1. короткая транзакция проверяет policy/idempotency и фиксирует резерв;
+2. offline provider вызывается без открытой DB-транзакции;
+3. короткая транзакция записывает физическую попытку и exact cost, затем доменная
+   транзакция связывает operation с analysis/draft и освобождает остаток резерва.
+
+Если provider уже вернул успех, но persistence результата завершился ошибкой, платный
+вызов не повторяется: operation переводится в `UNKNOWN` best-effort (либо остаётся в
+безопасном `CALLING`, если сама БД недоступна). Повтор требует будущего reconciliation,
+который не входит в Stage 5A.
+
+История сообщений ограничивается детерминированно: сохраняются самые новые непустые
+сообщения в пределах `AI_MAX_MESSAGES`, `AI_MAX_INPUT_CHARS` и
+`AI_MAX_INPUT_TOKENS`; у одного слишком большого сообщения остаётся новейший suffix.
+Provider получает также ограниченный `AI_MAX_OUTPUT_TOKENS` и явные connect/read/total
+timeouts.
+
+Retry разрешён только для connect timeout до передачи, 429 с ограниченным Retry-After
+и явно помеченных безопасными transport/5xx ошибок. Read/total timeout после возможной
+передачи, malformed/schema-invalid output и неоднозначный результат не вызывают новый
+платный запрос.
+
 ## Docker
 
 ```bash
@@ -84,4 +134,11 @@ alembic check
 docker compose config
 ```
 
-Тесты используют SQLite in-memory, не обращаются к сети и не требуют credentials.
+Основной набор тестов использует SQLite и не обращается к сети. PostgreSQL-specific
+изоляция, uniqueness и конкурентная резервация запускаются внутри Compose так:
+
+```bash
+RUN_POSTGRES_TESTS=1 pytest
+```
+
+Все AI-тесты используют recording provider без HTTP transport и не требуют credentials.

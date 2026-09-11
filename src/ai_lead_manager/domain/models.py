@@ -5,11 +5,14 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    Integer,
     Numeric,
     String,
     Text,
@@ -447,3 +450,147 @@ class AuditEvent(Base):
     entity_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     event_metadata: Mapped[dict] = mapped_column("metadata", JSON().with_variant(JSONB, "postgresql"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class TenantAIPolicy(Base, TimestampMixin):
+    __tablename__ = "tenant_ai_policies"
+    __table_args__ = (
+        CheckConstraint("mode IN ('MOCK', 'LIVE')", name="ck_tenant_ai_policies_mode"),
+        CheckConstraint(
+            "monthly_limit_microusd >= 0 AND per_call_limit_microusd >= 0",
+            name="ck_tenant_ai_policies_cost_limits",
+        ),
+        CheckConstraint(
+            "max_input_tokens > 0 AND max_output_tokens > 0 AND max_attempts > 0",
+            name="ck_tenant_ai_policies_execution_limits",
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    mode: Mapped[str] = mapped_column(String(10), default="MOCK", server_default="MOCK")
+    qualification_provider: Mapped[str] = mapped_column(String(100), nullable=False)
+    qualification_model: Mapped[str] = mapped_column(String(100), nullable=False)
+    draft_provider: Mapped[str] = mapped_column(String(100), nullable=False)
+    draft_model: Mapped[str] = mapped_column(String(100), nullable=False)
+    monthly_limit_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    per_call_limit_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    max_input_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_output_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    allow_unknown_cost: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+
+
+class AIOperation(Base, TimestampMixin):
+    __tablename__ = "ai_operations"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["lead_id", "tenant_id"],
+            ["leads.id", "leads.tenant_id"],
+            name="fk_ai_operations_lead_tenant",
+        ),
+        ForeignKeyConstraint(
+            ["result_analysis_id", "tenant_id"],
+            ["lead_analyses.id", "lead_analyses.tenant_id"],
+            name="fk_ai_operations_analysis_tenant",
+        ),
+        ForeignKeyConstraint(
+            ["result_draft_id", "tenant_id"],
+            ["response_drafts.id", "response_drafts.tenant_id"],
+            name="fk_ai_operations_draft_tenant",
+        ),
+        UniqueConstraint("id", "tenant_id", name="uq_ai_operations_id_tenant"),
+        UniqueConstraint(
+            "tenant_id",
+            "operation_type",
+            "idempotency_key",
+            name="uq_ai_operations_tenant_type_key",
+        ),
+        CheckConstraint(
+            "operation_type IN ('QUALIFICATION', 'DRAFT')",
+            name="ck_ai_operations_type",
+        ),
+        CheckConstraint(
+            "status IN ('RESERVED', 'CALLING', 'SUCCEEDED', 'FAILED', 'UNKNOWN')",
+            name="ck_ai_operations_status",
+        ),
+        CheckConstraint(
+            "estimated_max_cost_microusd >= 0 AND reserved_cost_microusd >= 0 "
+            "AND (actual_cost_microusd IS NULL OR actual_cost_microusd >= 0)",
+            name="ck_ai_operations_costs",
+        ),
+        Index("ix_ai_operations_tenant_created_status", "tenant_id", "created_at", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    operation_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    lead_id: Mapped[uuid.UUID | None]
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider: Mapped[str] = mapped_column(String(100), nullable=False)
+    model: Mapped[str] = mapped_column(String(100), nullable=False)
+    pricing_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    estimated_max_cost_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    reserved_cost_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    actual_cost_microusd: Mapped[int | None] = mapped_column(BigInteger)
+    result_analysis_id: Mapped[uuid.UUID | None]
+    result_draft_id: Mapped[uuid.UUID | None]
+    error_code: Mapped[str | None] = mapped_column(String(100))
+
+
+class ProviderCall(Base):
+    __tablename__ = "provider_calls"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["operation_id", "tenant_id"],
+            ["ai_operations.id", "ai_operations.tenant_id"],
+            ondelete="CASCADE",
+            name="fk_provider_calls_operation_tenant",
+        ),
+        UniqueConstraint("operation_id", "attempt", name="uq_provider_calls_operation_attempt"),
+        CheckConstraint(
+            "status IN ('SUCCEEDED', 'FAILED', 'UNKNOWN')",
+            name="ck_provider_calls_status",
+        ),
+        CheckConstraint("attempt > 0", name="ck_provider_calls_attempt"),
+        CheckConstraint(
+            "(latency_ms IS NULL OR latency_ms >= 0) "
+            "AND (input_tokens IS NULL OR input_tokens >= 0) "
+            "AND (output_tokens IS NULL OR output_tokens >= 0) "
+            "AND (cached_tokens IS NULL OR cached_tokens >= 0) "
+            "AND (actual_cost_microusd IS NULL OR actual_cost_microusd >= 0)",
+            name="ck_provider_calls_metrics",
+        ),
+        Index("ix_provider_calls_tenant_operation", "tenant_id", "operation_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    operation_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider: Mapped[str] = mapped_column(String(100), nullable=False)
+    model: Mapped[str] = mapped_column(String(100), nullable=False)
+    provider_request_id: Mapped[str | None] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    http_status: Mapped[int | None] = mapped_column(Integer)
+    error_kind: Mapped[str | None] = mapped_column(String(100))
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+    cached_tokens: Mapped[int | None] = mapped_column(Integer)
+    actual_cost_microusd: Mapped[int | None] = mapped_column(BigInteger)
+    cost_known: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    finish_reason: Mapped[str | None] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

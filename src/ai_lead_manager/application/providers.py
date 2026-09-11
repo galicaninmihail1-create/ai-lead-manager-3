@@ -1,5 +1,5 @@
 import re
-from typing import Literal, Protocol
+from typing import Annotated, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -7,25 +7,27 @@ from pydantic import BaseModel, ConfigDict, Field
 class QualificationContext(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    customer_name: str
+    customer_name: str = Field(max_length=200)
     has_email: bool
     has_phone: bool
-    messages: list[str] = Field(min_length=1)
+    messages: list[Annotated[str, Field(max_length=100_000)]] = Field(
+        min_length=1, max_length=100
+    )
 
 
 class StructuredQualification(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     intent: Literal["purchase", "exploration", "support", "unknown"]
-    task: str | None = None
-    pain_points: list[str]
+    task: str | None = Field(default=None, max_length=5_000)
+    pain_points: list[Annotated[str, Field(max_length=2_000)]] = Field(max_length=20)
     budget_amount: float | None = Field(default=None, ge=0)
     budget_currency: str | None = Field(default=None, min_length=3, max_length=3)
-    deadline: str | None = None
-    objections: list[str]
+    deadline: str | None = Field(default=None, max_length=200)
+    objections: list[Annotated[str, Field(max_length=2_000)]] = Field(max_length=20)
     urgency: Literal["high", "medium", "low"]
     decision_readiness: Literal["ready", "considering", "researching"]
-    summary: str
+    summary: str = Field(min_length=1, max_length=10_000)
     confidence: float = Field(ge=0, le=1)
 
 

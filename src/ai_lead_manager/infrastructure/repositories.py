@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from ai_lead_manager.domain.exceptions import ConcurrentInboundEventError, TenantScopeError
 from ai_lead_manager.domain.models import (
+    AIOperation,
     AuditEvent,
     Conversation,
     Customer,
@@ -222,6 +223,54 @@ class SqlAlchemyQualificationRepository:
     def add_audit(self, event: AuditEvent) -> AuditEvent:
         return self._add(event)
 
+    def get_analysis(self, analysis_id: uuid.UUID) -> LeadAnalysis | None:
+        return self.session.scalar(
+            select(LeadAnalysis).where(
+                LeadAnalysis.id == analysis_id,
+                LeadAnalysis.tenant_id == self.tenant_id,
+            )
+        )
+
+    def get_score_run_for_analysis(self, analysis_id: uuid.UUID) -> ScoreRun | None:
+        return self.session.scalar(
+            select(ScoreRun).where(
+                ScoreRun.analysis_id == analysis_id,
+                ScoreRun.tenant_id == self.tenant_id,
+            )
+        )
+
+    def get_score_factors(self, score_run_id: uuid.UUID) -> list[ScoreFactor]:
+        return list(
+            self.session.scalars(
+                select(ScoreFactor)
+                .where(
+                    ScoreFactor.score_run_id == score_run_id,
+                    ScoreFactor.tenant_id == self.tenant_id,
+                )
+                .order_by(ScoreFactor.created_at, ScoreFactor.id)
+            )
+        )
+
+    def get_recommendation_for_score_run(
+        self, score_run_id: uuid.UUID
+    ) -> NextActionRecommendation | None:
+        return self.session.scalar(
+            select(NextActionRecommendation).where(
+                NextActionRecommendation.score_run_id == score_run_id,
+                NextActionRecommendation.tenant_id == self.tenant_id,
+            )
+        )
+
+    def get_ai_operation_for_update(self, operation_id: uuid.UUID) -> AIOperation | None:
+        return self.session.scalar(
+            select(AIOperation)
+            .where(
+                AIOperation.id == operation_id,
+                AIOperation.tenant_id == self.tenant_id,
+            )
+            .with_for_update()
+        )
+
 
 class SqlAlchemyWorkflowRepository:
     def __init__(self, session: Session, tenant_id: uuid.UUID) -> None:
@@ -267,3 +316,13 @@ class SqlAlchemyWorkflowRepository:
 
     def add_audit(self, event: AuditEvent) -> AuditEvent:
         return self._add(event)
+
+    def get_ai_operation_for_update(self, operation_id: uuid.UUID) -> AIOperation | None:
+        return self.session.scalar(
+            select(AIOperation)
+            .where(
+                AIOperation.id == operation_id,
+                AIOperation.tenant_id == self.tenant_id,
+            )
+            .with_for_update()
+        )

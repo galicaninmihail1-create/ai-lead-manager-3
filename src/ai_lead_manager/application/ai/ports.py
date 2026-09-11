@@ -1,0 +1,26 @@
+import uuid
+from contextlib import AbstractContextManager
+from datetime import datetime
+from typing import Protocol
+
+from ai_lead_manager.domain.models import AIOperation, AuditEvent, ProviderCall, TenantAIPolicy
+
+
+class AIExecutionRepository(Protocol):
+    tenant_id: uuid.UUID
+
+    def get_policy_for_update(self) -> TenantAIPolicy | None: ...
+    def get_operation_by_key_for_update(
+        self, operation_type: str, idempotency_key: str
+    ) -> AIOperation | None: ...
+    def get_operation_for_update(self, operation_id: uuid.UUID) -> AIOperation | None: ...
+    def add_operation(self, operation: AIOperation) -> AIOperation: ...
+    def add_provider_call(self, call: ProviderCall) -> ProviderCall: ...
+    def current_period_spend(self, period_start: datetime) -> int: ...
+    def add_audit(self, event: AuditEvent) -> AuditEvent: ...
+
+
+class AIRepositoryFactory(Protocol):
+    def transaction(
+        self, tenant_id: uuid.UUID
+    ) -> AbstractContextManager[AIExecutionRepository]: ...

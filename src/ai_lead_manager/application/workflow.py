@@ -2,6 +2,14 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 
+from ai_lead_manager.application.ai.context import canonical_request_hash, estimate_tokens
+from ai_lead_manager.application.ai.contracts import (
+    AIExecutionOutcome,
+    AIOperationStatus,
+    AIOperationType,
+    StructuredAIRequest,
+)
+from ai_lead_manager.application.ai.executor import AIExecutor
 from ai_lead_manager.application.drafts import DraftContext, DraftProvider, DraftResult
 from ai_lead_manager.application.ports import UnitOfWork, WorkflowRepository
 from ai_lead_manager.application.schemas import (
@@ -9,6 +17,8 @@ from ai_lead_manager.application.schemas import (
     ResponseDraftResponse,
     SalesTaskResponse,
 )
+from ai_lead_manager.application.tenant_context import TenantContext
+from ai_lead_manager.config import get_settings
 from ai_lead_manager.domain.exceptions import (
     EntityNotFoundError,
     InvalidWorkflowTransitionError,
@@ -35,15 +45,23 @@ ALLOWED_TRANSITIONS = {
 class SalesWorkflowService:
     def __init__(
         self,
-        tenant_id: uuid.UUID,
+        tenant: TenantContext | uuid.UUID,
         repository: WorkflowRepository,
         uow: UnitOfWork,
         draft_provider: DraftProvider,
+        ai_executor: AIExecutor | None = None,
     ) -> None:
-        self.tenant_id = tenant_id
+        self.tenant_context = (
+            tenant
+            if isinstance(tenant, TenantContext)
+            else TenantContext.untrusted(tenant, "legacy_application_call")
+        )
+        self.tenant_id = self.tenant_context.tenant_id
         self.repository = repository
         self.uow = uow
         self.draft_provider = draft_provider
+        self.ai_executor = ai_executor
+        self.max_output_tokens = get_settings().ai_max_output_tokens
 
     def _execute[T](self, operation: Callable[[], T]) -> T:
         try:
@@ -82,26 +100,36 @@ class SalesWorkflowService:
         self._audit(actor_type, "task.created", "sales_task", task.id, {"lead_id": str(lead_id)})
         return self._task_response(task, created=True)
 
-    def generate_draft(self, lead_id: uuid.UUID, actor_type: str) -> ResponseDraftResponse:
+    def generate_draft(
+        self,
+        lead_id: uuid.UUID,
+        actor_type: str,
+        idempotency_key: str | None = None,
+    ) -> ResponseDraftResponse:
+        if idempotency_key is not None and self.ai_executor is not None:
+            return self._generate_draft_with_executor(lead_id, actor_type, idempotency_key)
         return self._execute(lambda: self._generate_draft(lead_id, actor_type))
 
-    def _generate_draft(self, lead_id: uuid.UUID, actor_type: str) -> ResponseDraftResponse:
+    def _draft_context(self, lead_id: uuid.UUID) -> tuple[Lead, object, object, DraftContext]:
         lead = self._lead(lead_id)
         customer = self.repository.get_customer(lead.customer_id)
         analysis = self.repository.latest_analysis(lead_id)
         if customer is None or analysis is None:
             raise WorkflowPrerequisiteError("Lead requires a customer and qualification analysis")
+        context = DraftContext(
+            customer_name=customer.name,
+            task=analysis.task,
+            summary=analysis.ai_summary,
+            budget_amount=float(analysis.budget_amount) if analysis.budget_amount is not None else None,
+            budget_currency=analysis.budget_currency,
+            deadline=analysis.deadline,
+        )
+        return lead, customer, analysis, context
+
+    def _generate_draft(self, lead_id: uuid.UUID, actor_type: str) -> ResponseDraftResponse:
+        lead, _customer, analysis, context = self._draft_context(lead_id)
         result = DraftResult.model_validate(
-            self.draft_provider.generate(
-                DraftContext(
-                    customer_name=customer.name,
-                    task=analysis.task,
-                    summary=analysis.ai_summary,
-                    budget_amount=float(analysis.budget_amount) if analysis.budget_amount is not None else None,
-                    budget_currency=analysis.budget_currency,
-                    deadline=analysis.deadline,
-                )
-            )
+            self.draft_provider.generate(context)
         )
         draft = self.repository.add_draft(
             ResponseDraft(
@@ -117,6 +145,93 @@ class SalesWorkflowService:
         )
         self._audit(actor_type, "draft.created", "response_draft", draft.id, {"lead_id": str(lead.id)})
         return self._draft_response(draft)
+
+    def _generate_draft_with_executor(
+        self, lead_id: uuid.UUID, actor_type: str, idempotency_key: str
+    ) -> ResponseDraftResponse:
+        execution: AIExecutionOutcome[DraftResult] | None = None
+        try:
+            lead, _customer, analysis, context = self._draft_context(lead_id)
+            payload = context.model_dump(mode="json")
+            request = StructuredAIRequest(
+                operation_type=AIOperationType.DRAFT,
+                schema_name="DraftResult",
+                schema_version="1",
+                prompt_version=self.draft_provider.prompt_version,
+                payload=payload,
+                estimated_input_tokens=estimate_tokens(str(payload)),
+                max_output_tokens=self.max_output_tokens,
+            )
+            request_hash = canonical_request_hash(
+                {
+                    "lead_id": str(lead.id),
+                    "analysis_id": str(analysis.id),
+                    "schema_name": request.schema_name,
+                    "schema_version": request.schema_version,
+                    "prompt_version": request.prompt_version,
+                    "payload": payload,
+                }
+            )
+            self.uow.commit()
+            execution = self.ai_executor.execute(
+                self.tenant_context,
+                AIOperationType.DRAFT,
+                lead.id,
+                idempotency_key,
+                request_hash,
+                request,
+                DraftResult,
+            )
+            if execution.replayed:
+                if execution.result_draft_id is None:
+                    raise WorkflowPrerequisiteError("Succeeded AI operation has no draft result")
+                draft = self.repository.get_draft(execution.result_draft_id)
+                if draft is None:
+                    raise WorkflowPrerequisiteError("Persisted draft result is missing")
+                self.uow.commit()
+                return self._draft_response(draft, execution.operation_id, True)
+            assert execution.value is not None
+            draft = self.repository.add_draft(
+                ResponseDraft(
+                    tenant_id=self.tenant_id,
+                    lead_id=lead.id,
+                    analysis_id=analysis.id,
+                    provider=execution.provider,
+                    model=execution.model,
+                    prompt_version=request.prompt_version,
+                    content=execution.value.content,
+                    status="APPROVAL_REQUIRED",
+                )
+            )
+            self._audit(
+                actor_type,
+                "draft.created",
+                "response_draft",
+                draft.id,
+                {"lead_id": str(lead.id), "ai_operation_id": str(execution.operation_id)},
+            )
+            operation = self.repository.get_ai_operation_for_update(execution.operation_id)
+            if operation is None or operation.status != AIOperationStatus.CALLING.value:
+                raise WorkflowPrerequisiteError("AI operation cannot be finalized")
+            operation.status = AIOperationStatus.SUCCEEDED.value
+            operation.reserved_cost_microusd = 0
+            operation.result_draft_id = draft.id
+            self._audit(
+                "system",
+                "ai.operation_finalized",
+                "ai_operation",
+                operation.id,
+                {"result_draft_id": str(draft.id)},
+            )
+            self.uow.commit()
+            return self._draft_response(draft, execution.operation_id, False)
+        except Exception:
+            self.uow.rollback()
+            if execution is not None and self.ai_executor is not None:
+                self.ai_executor.mark_unknown(
+                    self.tenant_context, execution.operation_id, "domain_finalization_failed"
+                )
+            raise
 
     def approve_draft(self, draft_id: uuid.UUID, actor_type: str) -> ResponseDraftResponse:
         return self._execute(lambda: self._set_draft_status(draft_id, "APPROVED", actor_type))
@@ -247,7 +362,11 @@ class SalesWorkflowService:
         )
 
     @staticmethod
-    def _draft_response(draft: ResponseDraft) -> ResponseDraftResponse:
+    def _draft_response(
+        draft: ResponseDraft,
+        operation_id: uuid.UUID | None = None,
+        replayed: bool = False,
+    ) -> ResponseDraftResponse:
         return ResponseDraftResponse(
             draft_id=draft.id,
             lead_id=draft.lead_id,
@@ -256,4 +375,6 @@ class SalesWorkflowService:
             status=draft.status,
             approved_at=draft.approved_at,
             rejected_at=draft.rejected_at,
+            ai_operation_id=operation_id,
+            replayed=replayed,
         )

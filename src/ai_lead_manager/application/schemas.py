@@ -92,6 +92,7 @@ class QualificationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     tenant_id: uuid.UUID
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class ScoreFactorView(BaseModel):
@@ -131,6 +132,8 @@ class QualificationResponse(BaseModel):
     score_factors: list[ScoreFactorView]
     next_best_action: NextActionView
     analysis: AnalysisSummaryView
+    ai_operation_id: uuid.UUID | None = None
+    replayed: bool = False
 
 
 ActorType = Literal["manager", "system"]
@@ -141,6 +144,7 @@ class TenantActorRequest(BaseModel):
 
     tenant_id: uuid.UUID
     actor_type: ActorType = "manager"
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class LeadStatusRequest(TenantActorRequest):
@@ -176,3 +180,5 @@ class ResponseDraftResponse(BaseModel):
     status: Literal["APPROVAL_REQUIRED", "APPROVED", "REJECTED"]
     approved_at: datetime | None = None
     rejected_at: datetime | None = None
+    ai_operation_id: uuid.UUID | None = None
+    replayed: bool = False

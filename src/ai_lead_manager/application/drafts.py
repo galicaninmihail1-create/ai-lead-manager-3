@@ -1,6 +1,6 @@
 from typing import Protocol
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class DraftContext(BaseModel):
@@ -17,7 +17,7 @@ class DraftContext(BaseModel):
 class DraftResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    content: str
+    content: str = Field(min_length=1, max_length=20_000)
 
 
 class DraftProvider(Protocol):

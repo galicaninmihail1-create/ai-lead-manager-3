@@ -5,6 +5,12 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
+from ai_lead_manager.application.ai.contracts import (
+    AIErrorKind,
+    AIExecutionError,
+    AIProviderError,
+    BudgetExceededError,
+)
 from ai_lead_manager.application.drafts import MockDraftProvider
 from ai_lead_manager.application.inbound import InboundIngestionService
 from ai_lead_manager.application.providers import MockQualificationProvider
@@ -20,6 +26,7 @@ from ai_lead_manager.application.schemas import (
     SalesTaskResponse,
     TenantActorRequest,
 )
+from ai_lead_manager.application.tenant_context import TenantContext
 from ai_lead_manager.application.workflow import SalesWorkflowService
 from ai_lead_manager.domain.exceptions import (
     EntityNotFoundError,
@@ -28,6 +35,7 @@ from ai_lead_manager.domain.exceptions import (
     QualificationUnavailableError,
     WorkflowPrerequisiteError,
 )
+from ai_lead_manager.infrastructure.ai.runtime import get_ai_executor
 from ai_lead_manager.infrastructure.database import get_session
 from ai_lead_manager.infrastructure.repositories import (
     SqlAlchemyInboundRepository,
@@ -72,26 +80,44 @@ def qualify_lead(
     session: Annotated[Session, Depends(get_session)],
 ) -> QualificationResponse:
     service = QualificationService(
-        request.tenant_id,
+        TenantContext.untrusted(request.tenant_id),
         SqlAlchemyQualificationRepository(session, request.tenant_id),
         SqlAlchemyUnitOfWork(session),
         MockQualificationProvider(),
+        get_ai_executor(),
     )
     try:
-        return service.qualify(lead_id)
+        return service.qualify(lead_id, request.idempotency_key)
     except EntityNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except QualificationUnavailableError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+    except (AIExecutionError, AIProviderError) as error:
+        raise ai_http_error(error) from error
 
 
 def workflow_service(session: Session, tenant_id: uuid.UUID) -> SalesWorkflowService:
     return SalesWorkflowService(
-        tenant_id,
+        TenantContext.untrusted(tenant_id),
         SqlAlchemyWorkflowRepository(session, tenant_id),
         SqlAlchemyUnitOfWork(session),
         MockDraftProvider(),
+        get_ai_executor(),
     )
+
+
+def ai_http_error(error: AIExecutionError | AIProviderError) -> HTTPException:
+    if isinstance(error, BudgetExceededError):
+        status = 402
+    elif error.kind == AIErrorKind.RATE_LIMIT:
+        status = 429
+    elif error.kind == AIErrorKind.PROVIDER_DISABLED:
+        status = 503
+    elif error.kind in {AIErrorKind.INVALID_REQUEST, AIErrorKind.AMBIGUOUS_RESULT}:
+        status = 409
+    else:
+        status = 502
+    return HTTPException(status_code=status, detail={"code": error.kind.value})
 
 
 def workflow_result[T](operation: Callable[[], T]) -> T:
@@ -101,6 +127,8 @@ def workflow_result[T](operation: Callable[[], T]) -> T:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except (InvalidWorkflowTransitionError, WorkflowPrerequisiteError) as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+    except (AIExecutionError, AIProviderError) as error:
+        raise ai_http_error(error) from error
 
 
 @router.post("/api/v1/leads/{lead_id}/tasks/from-recommendation", response_model=SalesTaskResponse)
@@ -120,7 +148,11 @@ def generate_draft(
     session: Annotated[Session, Depends(get_session)],
 ) -> ResponseDraftResponse:
     service = workflow_service(session, request.tenant_id)
-    return workflow_result(lambda: service.generate_draft(lead_id, request.actor_type))
+    return workflow_result(
+        lambda: service.generate_draft(
+            lead_id, request.actor_type, request.idempotency_key
+        )
+    )
 
 
 @router.post("/api/v1/drafts/{draft_id}/approve", response_model=ResponseDraftResponse)
