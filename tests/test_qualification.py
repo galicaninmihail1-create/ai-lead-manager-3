@@ -121,7 +121,7 @@ def test_missing_inbound_message_is_rejected_without_history(session: Session) -
         tenant_id=tenant_id,
         customer_id=customer.id,
         conversation_id=conversation.id,
-        status="new",
+        status="NEW",
     )
     session.add(lead)
     session.commit()

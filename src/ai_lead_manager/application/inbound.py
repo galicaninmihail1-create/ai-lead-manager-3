@@ -124,7 +124,7 @@ class InboundIngestionService:
                     tenant_id=data.tenant_id,
                     customer_id=customer.id,
                     conversation_id=conversation.id,
-                    status="new",
+                    status="NEW",
                     source=data.source,
                 )
             )

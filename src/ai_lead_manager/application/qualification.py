@@ -15,6 +15,7 @@ from ai_lead_manager.application.schemas import (
 from ai_lead_manager.application.scoring import ScoreContext, calculate_score, recommend_next_action
 from ai_lead_manager.domain.exceptions import EntityNotFoundError, QualificationUnavailableError
 from ai_lead_manager.domain.models import (
+    AuditEvent,
     LeadAnalysis,
     NextActionRecommendation,
     ScoreFactor,
@@ -122,6 +123,21 @@ class QualificationService:
             )
         )
         lead.score = score.score
+        self.repository.add_audit(
+            AuditEvent(
+                tenant_id=self.tenant_id,
+                actor_type="system",
+                action="qualification.completed",
+                entity_type="lead",
+                entity_id=lead.id,
+                event_metadata={
+                    "analysis_id": str(analysis.id),
+                    "score_run_id": str(score_run.id),
+                    "score": score.score,
+                    "temperature": score.temperature,
+                },
+            )
+        )
         self.uow.commit()
         return QualificationResponse(
             tenant_id=self.tenant_id,

@@ -1,6 +1,7 @@
 import uuid
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from ai_lead_manager.application.schemas import CustomerCreate, LeadCreate, TenantCreate
@@ -46,6 +47,11 @@ def test_create_lead(session: Session) -> None:
     assert lead.tenant_id == tenant_id
     assert lead.customer_id == customer.id
     assert leads.get(lead.id) == lead
+
+
+def test_lead_status_rejects_arbitrary_strings() -> None:
+    with pytest.raises(ValidationError):
+        LeadCreate(customer_id=uuid.uuid4(), status="arbitrary")
 
 
 def test_tenant_isolation(session: Session) -> None:

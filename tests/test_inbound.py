@@ -223,7 +223,7 @@ def test_unsupported_identity_type_is_rejected_by_database(session: Session) -> 
         ),
         (
             lambda a, b, customer, conversation: Lead(
-                tenant_id=a, customer_id=customer, conversation_id=conversation, status="new"
+                tenant_id=a, customer_id=customer, conversation_id=conversation, status="NEW"
             ),
             "lead",
         ),

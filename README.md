@@ -31,6 +31,26 @@ Development/internal endpoint `POST /api/v1/leads/{lead_id}/qualify` прини�
 температуру и объяснимые факторы. Каждая повторная квалификация сохраняется как новый исторический
 run; рекомендации записываются, но никогда не отправляются автоматически.
 
+## Sales Workflow Core
+
+После квалификации локальный workflow создаёт одну идемпотентную задачу из последней
+рекомендации, генерирует детерминированный mock-черновик ответа и требует явного
+approve/reject от менеджера. Отправка сообщений отсутствует. Статус лида меняется только по цепочке
+`NEW → QUALIFIED → CONTACTED → MEETING → WON/LOST`; каждое изменение сохраняется в
+истории. Ключевые действия квалификации, задач, черновиков и статусов пишутся в
+tenant-scoped audit log.
+
+HTTP endpoints:
+
+- `POST /api/v1/leads/{lead_id}/tasks/from-recommendation`;
+- `POST /api/v1/leads/{lead_id}/drafts`;
+- `POST /api/v1/drafts/{draft_id}/approve` и `/reject`;
+- `POST /api/v1/tasks/{task_id}/complete` и `/cancel`;
+- `POST /api/v1/leads/{lead_id}/status`.
+
+Все запросы принимают `tenant_id`; repository-слой фильтрует чтения по tenant, а
+составные foreign keys блокируют cross-tenant связи на уровне PostgreSQL.
+
 ## Docker
 
 ```bash

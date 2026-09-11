@@ -1,9 +1,12 @@
 import uuid
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from ai_lead_manager.application.normalization import normalize_phone
+
+LeadStatus = Literal["NEW", "QUALIFIED", "CONTACTED", "MEETING", "WON", "LOST"]
 
 
 class TenantCreate(BaseModel):
@@ -19,7 +22,7 @@ class CustomerCreate(BaseModel):
 
 class LeadCreate(BaseModel):
     customer_id: uuid.UUID
-    status: str = "new"
+    status: LeadStatus = "NEW"
     score: int | None = None
     source: str | None = None
     notes: str | None = None
@@ -128,3 +131,48 @@ class QualificationResponse(BaseModel):
     score_factors: list[ScoreFactorView]
     next_best_action: NextActionView
     analysis: AnalysisSummaryView
+
+
+ActorType = Literal["manager", "system"]
+
+
+class TenantActorRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: uuid.UUID
+    actor_type: ActorType = "manager"
+
+
+class LeadStatusRequest(TenantActorRequest):
+    status: LeadStatus
+    reason: str | None = Field(default=None, max_length=1000)
+
+
+class LeadStatusResponse(BaseModel):
+    lead_id: uuid.UUID
+    previous_status: LeadStatus
+    status: LeadStatus
+    changed: bool
+    history_id: uuid.UUID | None
+
+
+class SalesTaskResponse(BaseModel):
+    task_id: uuid.UUID
+    lead_id: uuid.UUID
+    recommendation_id: uuid.UUID | None
+    task_type: str
+    title: str
+    description: str | None
+    priority: int
+    status: Literal["OPEN", "DONE", "CANCELLED"]
+    created: bool = False
+
+
+class ResponseDraftResponse(BaseModel):
+    draft_id: uuid.UUID
+    lead_id: uuid.UUID
+    analysis_id: uuid.UUID
+    content: str
+    status: Literal["APPROVAL_REQUIRED", "APPROVED", "REJECTED"]
+    approved_at: datetime | None = None
+    rejected_at: datetime | None = None

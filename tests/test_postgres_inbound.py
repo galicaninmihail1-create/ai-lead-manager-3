@@ -14,7 +14,10 @@ from ai_lead_manager.domain.models import (
     InboundEvent,
     Lead,
     LeadAnalysis,
+    LeadStatusHistory,
     Message,
+    ResponseDraft,
+    SalesTask,
     ScoreRun,
     Tenant,
 )
@@ -93,6 +96,39 @@ def test_postgres_idempotency_and_tenant_constraints() -> None:
             )
             session.add(analysis)
             session.commit()
+            cross_tenant_entities = [
+                LeadStatusHistory(
+                    tenant_id=tenant_b,
+                    lead_id=first.lead_id,
+                    from_status="NEW",
+                    to_status="QUALIFIED",
+                    actor_type="manager",
+                ),
+                SalesTask(
+                    tenant_id=tenant_b,
+                    lead_id=first.lead_id,
+                    task_type="schedule_call",
+                    title="Cross tenant",
+                    priority=1,
+                    status="OPEN",
+                ),
+                ResponseDraft(
+                    tenant_id=tenant_b,
+                    lead_id=first.lead_id,
+                    analysis_id=analysis.id,
+                    provider="mock",
+                    model="test",
+                    prompt_version="1",
+                    content="Cross tenant",
+                    status="APPROVAL_REQUIRED",
+                ),
+            ]
+            for entity in cross_tenant_entities:
+                session.add(entity)
+                with pytest.raises(IntegrityError):
+                    session.commit()
+                session.rollback()
+
             session.add(
                 ScoreRun(
                     tenant_id=tenant_b,

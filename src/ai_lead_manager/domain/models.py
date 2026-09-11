@@ -155,6 +155,10 @@ class Lead(Base, TimestampMixin):
         ),
         UniqueConstraint("id", "tenant_id", name="uq_leads_id_tenant"),
         UniqueConstraint("tenant_id", "customer_id", name="uq_leads_tenant_customer"),
+        CheckConstraint(
+            "status IN ('NEW', 'QUALIFIED', 'CONTACTED', 'MEETING', 'WON', 'LOST')",
+            name="ck_leads_lifecycle_status",
+        ),
         Index("ix_leads_tenant_status_created", "tenant_id", "status", "created_at"),
     )
 
@@ -164,7 +168,7 @@ class Lead(Base, TimestampMixin):
     )
     customer_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     conversation_id: Mapped[uuid.UUID | None]
-    status: Mapped[str] = mapped_column(String(50), default="new", nullable=False)
+    status: Mapped[str] = mapped_column(String(50), default="NEW", nullable=False)
     score: Mapped[int | None]
     source: Mapped[str | None] = mapped_column(String(100))
     notes: Mapped[str | None] = mapped_column(Text)
@@ -338,6 +342,7 @@ class NextActionRecommendation(Base):
             ondelete="CASCADE",
             name="fk_next_actions_run_tenant",
         ),
+        UniqueConstraint("id", "tenant_id", name="uq_next_actions_id_tenant"),
         CheckConstraint("priority >= 1 AND priority <= 3", name="ck_next_actions_priority"),
         Index("ix_next_actions_tenant_lead_created", "tenant_id", "lead_id", "created_at"),
     )
@@ -354,3 +359,91 @@ class NextActionRecommendation(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class LeadStatusHistory(Base):
+    __tablename__ = "lead_status_history"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["lead_id", "tenant_id"],
+            ["leads.id", "leads.tenant_id"],
+            ondelete="CASCADE",
+            name="fk_lead_status_history_lead_tenant",
+        ),
+        CheckConstraint(
+            "to_status IN ('NEW', 'QUALIFIED', 'CONTACTED', 'MEETING', 'WON', 'LOST')",
+            name="ck_lead_status_history_to_status",
+        ),
+        Index("ix_lead_status_history_tenant_lead_created", "tenant_id", "lead_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    lead_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    from_status: Mapped[str | None] = mapped_column(String(50))
+    to_status: Mapped[str] = mapped_column(String(50), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text)
+    actor_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SalesTask(Base, TimestampMixin):
+    __tablename__ = "sales_tasks"
+    __table_args__ = (
+        ForeignKeyConstraint(["lead_id", "tenant_id"], ["leads.id", "leads.tenant_id"], ondelete="CASCADE", name="fk_sales_tasks_lead_tenant"),
+        ForeignKeyConstraint(["recommendation_id", "tenant_id"], ["next_action_recommendations.id", "next_action_recommendations.tenant_id"], name="fk_sales_tasks_recommendation_tenant"),
+        UniqueConstraint("tenant_id", "recommendation_id", name="uq_sales_tasks_tenant_recommendation"),
+        UniqueConstraint("id", "tenant_id", name="uq_sales_tasks_id_tenant"),
+        CheckConstraint("status IN ('OPEN', 'DONE', 'CANCELLED')", name="ck_sales_tasks_status"),
+        CheckConstraint("priority >= 1 AND priority <= 3", name="ck_sales_tasks_priority"),
+        Index("ix_sales_tasks_tenant_lead_status", "tenant_id", "lead_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    lead_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    recommendation_id: Mapped[uuid.UUID | None]
+    task_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    priority: Mapped[int] = mapped_column(nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="OPEN", nullable=False)
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ResponseDraft(Base, TimestampMixin):
+    __tablename__ = "response_drafts"
+    __table_args__ = (
+        ForeignKeyConstraint(["lead_id", "tenant_id"], ["leads.id", "leads.tenant_id"], ondelete="CASCADE", name="fk_response_drafts_lead_tenant"),
+        ForeignKeyConstraint(["analysis_id", "tenant_id"], ["lead_analyses.id", "lead_analyses.tenant_id"], ondelete="CASCADE", name="fk_response_drafts_analysis_tenant"),
+        UniqueConstraint("id", "tenant_id", name="uq_response_drafts_id_tenant"),
+        CheckConstraint("status IN ('APPROVAL_REQUIRED', 'APPROVED', 'REJECTED')", name="ck_response_drafts_status"),
+        Index("ix_response_drafts_tenant_lead_created", "tenant_id", "lead_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    lead_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    analysis_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    provider: Mapped[str] = mapped_column(String(100), nullable=False)
+    model: Mapped[str] = mapped_column(String(100), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="APPROVAL_REQUIRED", nullable=False)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+    __table_args__ = (Index("ix_audit_events_tenant_entity_created", "tenant_id", "entity_type", "entity_id", "created_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    actor_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    action: Mapped[str] = mapped_column(String(100), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    entity_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    event_metadata: Mapped[dict] = mapped_column("metadata", JSON().with_variant(JSONB, "postgresql"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

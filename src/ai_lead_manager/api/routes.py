@@ -1,28 +1,39 @@
 import uuid
+from collections.abc import Callable
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
+from ai_lead_manager.application.drafts import MockDraftProvider
 from ai_lead_manager.application.inbound import InboundIngestionService
 from ai_lead_manager.application.providers import MockQualificationProvider
 from ai_lead_manager.application.qualification import QualificationService
 from ai_lead_manager.application.schemas import (
     InboundHttpRequest,
     InboundHttpResponse,
+    LeadStatusRequest,
+    LeadStatusResponse,
     QualificationRequest,
     QualificationResponse,
+    ResponseDraftResponse,
+    SalesTaskResponse,
+    TenantActorRequest,
 )
+from ai_lead_manager.application.workflow import SalesWorkflowService
 from ai_lead_manager.domain.exceptions import (
     EntityNotFoundError,
     IdentityConflictError,
+    InvalidWorkflowTransitionError,
     QualificationUnavailableError,
+    WorkflowPrerequisiteError,
 )
 from ai_lead_manager.infrastructure.database import get_session
 from ai_lead_manager.infrastructure.repositories import (
     SqlAlchemyInboundRepository,
     SqlAlchemyQualificationRepository,
     SqlAlchemyUnitOfWork,
+    SqlAlchemyWorkflowRepository,
 )
 
 router = APIRouter()
@@ -72,3 +83,95 @@ def qualify_lead(
         raise HTTPException(status_code=404, detail=str(error)) from error
     except QualificationUnavailableError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+def workflow_service(session: Session, tenant_id: uuid.UUID) -> SalesWorkflowService:
+    return SalesWorkflowService(
+        tenant_id,
+        SqlAlchemyWorkflowRepository(session, tenant_id),
+        SqlAlchemyUnitOfWork(session),
+        MockDraftProvider(),
+    )
+
+
+def workflow_result[T](operation: Callable[[], T]) -> T:
+    try:
+        return operation()
+    except EntityNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except (InvalidWorkflowTransitionError, WorkflowPrerequisiteError) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.post("/api/v1/leads/{lead_id}/tasks/from-recommendation", response_model=SalesTaskResponse)
+def create_task(
+    lead_id: uuid.UUID,
+    request: TenantActorRequest,
+    session: Annotated[Session, Depends(get_session)],
+) -> SalesTaskResponse:
+    service = workflow_service(session, request.tenant_id)
+    return workflow_result(lambda: service.create_task_from_recommendation(lead_id, request.actor_type))
+
+
+@router.post("/api/v1/leads/{lead_id}/drafts", response_model=ResponseDraftResponse)
+def generate_draft(
+    lead_id: uuid.UUID,
+    request: TenantActorRequest,
+    session: Annotated[Session, Depends(get_session)],
+) -> ResponseDraftResponse:
+    service = workflow_service(session, request.tenant_id)
+    return workflow_result(lambda: service.generate_draft(lead_id, request.actor_type))
+
+
+@router.post("/api/v1/drafts/{draft_id}/approve", response_model=ResponseDraftResponse)
+def approve_draft(
+    draft_id: uuid.UUID,
+    request: TenantActorRequest,
+    session: Annotated[Session, Depends(get_session)],
+) -> ResponseDraftResponse:
+    service = workflow_service(session, request.tenant_id)
+    return workflow_result(lambda: service.approve_draft(draft_id, request.actor_type))
+
+
+@router.post("/api/v1/drafts/{draft_id}/reject", response_model=ResponseDraftResponse)
+def reject_draft(
+    draft_id: uuid.UUID,
+    request: TenantActorRequest,
+    session: Annotated[Session, Depends(get_session)],
+) -> ResponseDraftResponse:
+    service = workflow_service(session, request.tenant_id)
+    return workflow_result(lambda: service.reject_draft(draft_id, request.actor_type))
+
+
+@router.post("/api/v1/tasks/{task_id}/complete", response_model=SalesTaskResponse)
+def complete_task(
+    task_id: uuid.UUID,
+    request: TenantActorRequest,
+    session: Annotated[Session, Depends(get_session)],
+) -> SalesTaskResponse:
+    service = workflow_service(session, request.tenant_id)
+    return workflow_result(lambda: service.complete_task(task_id, request.actor_type))
+
+
+@router.post("/api/v1/tasks/{task_id}/cancel", response_model=SalesTaskResponse)
+def cancel_task(
+    task_id: uuid.UUID,
+    request: TenantActorRequest,
+    session: Annotated[Session, Depends(get_session)],
+) -> SalesTaskResponse:
+    service = workflow_service(session, request.tenant_id)
+    return workflow_result(lambda: service.cancel_task(task_id, request.actor_type))
+
+
+@router.post("/api/v1/leads/{lead_id}/status", response_model=LeadStatusResponse)
+def transition_lead_status(
+    lead_id: uuid.UUID,
+    request: LeadStatusRequest,
+    session: Annotated[Session, Depends(get_session)],
+) -> LeadStatusResponse:
+    service = workflow_service(session, request.tenant_id)
+    return workflow_result(
+        lambda: service.transition_lead(
+            lead_id, request.status, request.reason, request.actor_type
+        )
+    )

@@ -8,14 +8,18 @@ from sqlalchemy.orm import Session
 
 from ai_lead_manager.domain.exceptions import ConcurrentInboundEventError, TenantScopeError
 from ai_lead_manager.domain.models import (
+    AuditEvent,
     Conversation,
     Customer,
     CustomerIdentity,
     InboundEvent,
     Lead,
     LeadAnalysis,
+    LeadStatusHistory,
     Message,
     NextActionRecommendation,
+    ResponseDraft,
+    SalesTask,
     ScoreFactor,
     ScoreRun,
     Tenant,
@@ -214,3 +218,52 @@ class SqlAlchemyQualificationRepository:
         self, recommendation: NextActionRecommendation
     ) -> NextActionRecommendation:
         return self._add(recommendation)
+
+    def add_audit(self, event: AuditEvent) -> AuditEvent:
+        return self._add(event)
+
+
+class SqlAlchemyWorkflowRepository:
+    def __init__(self, session: Session, tenant_id: uuid.UUID) -> None:
+        self.session = session
+        self.tenant_id = tenant_id
+
+    def _add[T](self, entity: T) -> T:
+        if getattr(entity, "tenant_id", None) != self.tenant_id:
+            raise TenantScopeError("Entity tenant does not match repository tenant scope")
+        self.session.add(entity)
+        self.session.flush()
+        return entity
+
+    def get_lead(self, lead_id: uuid.UUID) -> Lead | None:
+        return self.session.scalar(select(Lead).where(Lead.id == lead_id, Lead.tenant_id == self.tenant_id))
+
+    def get_customer(self, customer_id: uuid.UUID) -> Customer | None:
+        return self.session.scalar(select(Customer).where(Customer.id == customer_id, Customer.tenant_id == self.tenant_id))
+
+    def latest_recommendation(self, lead_id: uuid.UUID) -> NextActionRecommendation | None:
+        return self.session.scalar(select(NextActionRecommendation).where(NextActionRecommendation.tenant_id == self.tenant_id, NextActionRecommendation.lead_id == lead_id).order_by(NextActionRecommendation.created_at.desc(), NextActionRecommendation.id.desc()))
+
+    def latest_analysis(self, lead_id: uuid.UUID) -> LeadAnalysis | None:
+        return self.session.scalar(select(LeadAnalysis).where(LeadAnalysis.tenant_id == self.tenant_id, LeadAnalysis.lead_id == lead_id).order_by(LeadAnalysis.created_at.desc(), LeadAnalysis.id.desc()))
+
+    def task_for_recommendation(self, recommendation_id: uuid.UUID) -> SalesTask | None:
+        return self.session.scalar(select(SalesTask).where(SalesTask.tenant_id == self.tenant_id, SalesTask.recommendation_id == recommendation_id))
+
+    def get_task(self, task_id: uuid.UUID) -> SalesTask | None:
+        return self.session.scalar(select(SalesTask).where(SalesTask.id == task_id, SalesTask.tenant_id == self.tenant_id))
+
+    def get_draft(self, draft_id: uuid.UUID) -> ResponseDraft | None:
+        return self.session.scalar(select(ResponseDraft).where(ResponseDraft.id == draft_id, ResponseDraft.tenant_id == self.tenant_id))
+
+    def add_task(self, task: SalesTask) -> SalesTask:
+        return self._add(task)
+
+    def add_draft(self, draft: ResponseDraft) -> ResponseDraft:
+        return self._add(draft)
+
+    def add_status_history(self, history: LeadStatusHistory) -> LeadStatusHistory:
+        return self._add(history)
+
+    def add_audit(self, event: AuditEvent) -> AuditEvent:
+        return self._add(event)
