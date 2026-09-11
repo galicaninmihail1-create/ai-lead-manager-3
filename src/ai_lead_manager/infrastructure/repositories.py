@@ -13,7 +13,11 @@ from ai_lead_manager.domain.models import (
     CustomerIdentity,
     InboundEvent,
     Lead,
+    LeadAnalysis,
     Message,
+    NextActionRecommendation,
+    ScoreFactor,
+    ScoreRun,
     Tenant,
 )
 
@@ -159,3 +163,54 @@ class SqlAlchemyInboundRepository:
 
     def add_lead(self, lead: Lead) -> Lead:
         return self._add(lead)
+
+
+class SqlAlchemyQualificationRepository:
+    def __init__(self, session: Session, tenant_id: uuid.UUID) -> None:
+        self.session = session
+        self.tenant_id = tenant_id
+
+    def _add[T](self, entity: T) -> T:
+        if getattr(entity, "tenant_id", None) != self.tenant_id:
+            raise TenantScopeError("Entity tenant does not match repository tenant scope")
+        self.session.add(entity)
+        self.session.flush()
+        return entity
+
+    def get_lead(self, lead_id: uuid.UUID) -> Lead | None:
+        return self.session.scalar(
+            select(Lead).where(Lead.id == lead_id, Lead.tenant_id == self.tenant_id)
+        )
+
+    def get_customer(self, customer_id: uuid.UUID) -> Customer | None:
+        return self.session.scalar(
+            select(Customer).where(Customer.id == customer_id, Customer.tenant_id == self.tenant_id)
+        )
+
+    def get_inbound_messages(self, lead: Lead) -> list[Message]:
+        if lead.tenant_id != self.tenant_id or lead.conversation_id is None:
+            return []
+        statement = (
+            select(Message)
+            .where(
+                Message.tenant_id == self.tenant_id,
+                Message.conversation_id == lead.conversation_id,
+                Message.direction == "inbound",
+            )
+            .order_by(Message.created_at, Message.id)
+        )
+        return list(self.session.scalars(statement))
+
+    def add_analysis(self, analysis: LeadAnalysis) -> LeadAnalysis:
+        return self._add(analysis)
+
+    def add_score_run(self, score_run: ScoreRun) -> ScoreRun:
+        return self._add(score_run)
+
+    def add_score_factor(self, factor: ScoreFactor) -> ScoreFactor:
+        return self._add(factor)
+
+    def add_recommendation(
+        self, recommendation: NextActionRecommendation
+    ) -> NextActionRecommendation:
+        return self._add(recommendation)

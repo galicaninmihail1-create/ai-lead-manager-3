@@ -12,3 +12,7 @@ class ConcurrentInboundEventError(Exception):
 
 class IdentityConflictError(Exception):
     """Provided identities resolve to incompatible customers."""
+
+
+class QualificationUnavailableError(ValueError):
+    """A lead cannot be qualified from the available source facts."""

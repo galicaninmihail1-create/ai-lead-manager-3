@@ -83,3 +83,48 @@ class InboundHttpResponse(BaseModel):
     lead_id: uuid.UUID
     lead_created: bool
     status: Literal["processed"] = "processed"
+
+
+class QualificationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: uuid.UUID
+
+
+class ScoreFactorView(BaseModel):
+    factor_name: str
+    raw_value: str
+    contribution: int
+    explanation: str
+
+
+class NextActionView(BaseModel):
+    action_type: str
+    reason: str
+    priority: int
+
+
+class AnalysisSummaryView(BaseModel):
+    intent: str | None
+    task: str | None
+    pain_points: list[str]
+    budget_amount: float | None
+    budget_currency: str | None
+    deadline: str | None
+    objections: list[str]
+    urgency: str | None
+    confidence: float | None
+    summary: str | None
+
+
+class QualificationResponse(BaseModel):
+    tenant_id: uuid.UUID
+    lead_id: uuid.UUID
+    analysis_id: uuid.UUID
+    score_run_id: uuid.UUID
+    score: int
+    temperature: Literal["HOT", "WARM", "COLD"]
+    ruleset_version: str
+    score_factors: list[ScoreFactorView]
+    next_best_action: NextActionView
+    analysis: AnalysisSummaryView

@@ -13,7 +13,9 @@ from ai_lead_manager.domain.models import (
     CustomerIdentity,
     InboundEvent,
     Lead,
+    LeadAnalysis,
     Message,
+    ScoreRun,
     Tenant,
 )
 from ai_lead_manager.infrastructure.repositories import (
@@ -73,6 +75,46 @@ def test_postgres_idempotency_and_tenant_constraints() -> None:
                     customer_id=customer.id,
                     identity_type="email",
                     normalized_value="cross@example.com",
+                )
+            )
+            with pytest.raises(IntegrityError):
+                session.commit()
+            session.rollback()
+
+            analysis = LeadAnalysis(
+                tenant_id=tenant_a,
+                lead_id=first.lead_id,
+                provider="mock",
+                model="test",
+                schema_version="1",
+                prompt_version="1",
+                pain_points=[],
+                objections=[],
+            )
+            session.add(analysis)
+            session.commit()
+            session.add(
+                ScoreRun(
+                    tenant_id=tenant_b,
+                    lead_id=first.lead_id,
+                    analysis_id=analysis.id,
+                    score=50,
+                    temperature="WARM",
+                    ruleset_version="qualification-v1",
+                )
+            )
+            with pytest.raises(IntegrityError):
+                session.commit()
+            session.rollback()
+
+            session.add(
+                ScoreRun(
+                    tenant_id=tenant_a,
+                    lead_id=first.lead_id,
+                    analysis_id=analysis.id,
+                    score=101,
+                    temperature="HOT",
+                    ruleset_version="qualification-v1",
                 )
             )
             with pytest.raises(IntegrityError):

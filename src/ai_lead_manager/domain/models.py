@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -217,3 +218,139 @@ class InboundEvent(Base, TimestampMixin):
     conversation_id: Mapped[uuid.UUID | None]
     message_id: Mapped[uuid.UUID | None]
     lead_id: Mapped[uuid.UUID | None]
+
+
+class LeadAnalysis(Base):
+    __tablename__ = "lead_analyses"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["lead_id", "tenant_id"],
+            ["leads.id", "leads.tenant_id"],
+            ondelete="CASCADE",
+            name="fk_lead_analyses_lead_tenant",
+        ),
+        UniqueConstraint("id", "tenant_id", name="uq_lead_analyses_id_tenant"),
+        Index("ix_lead_analyses_tenant_lead_created", "tenant_id", "lead_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    lead_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    provider: Mapped[str] = mapped_column(String(100), nullable=False)
+    model: Mapped[str] = mapped_column(String(100), nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    intent: Mapped[str | None] = mapped_column(String(100))
+    task: Mapped[str | None] = mapped_column(Text)
+    pain_points: Mapped[list] = mapped_column(JSON().with_variant(JSONB, "postgresql"), nullable=False)
+    budget_amount: Mapped[float | None] = mapped_column(Numeric(14, 2))
+    budget_currency: Mapped[str | None] = mapped_column(String(3))
+    deadline: Mapped[str | None] = mapped_column(String(100))
+    objections: Mapped[list] = mapped_column(JSON().with_variant(JSONB, "postgresql"), nullable=False)
+    urgency: Mapped[str | None] = mapped_column(String(30))
+    decision_readiness: Mapped[str | None] = mapped_column(String(30))
+    ai_summary: Mapped[str | None] = mapped_column(Text)
+    confidence: Mapped[float | None] = mapped_column(Numeric(4, 3))
+    raw_output: Mapped[dict | None] = mapped_column(JSON().with_variant(JSONB, "postgresql"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ScoreRun(Base):
+    __tablename__ = "score_runs"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["lead_id", "tenant_id"],
+            ["leads.id", "leads.tenant_id"],
+            ondelete="CASCADE",
+            name="fk_score_runs_lead_tenant",
+        ),
+        ForeignKeyConstraint(
+            ["analysis_id", "tenant_id"],
+            ["lead_analyses.id", "lead_analyses.tenant_id"],
+            ondelete="CASCADE",
+            name="fk_score_runs_analysis_tenant",
+        ),
+        UniqueConstraint("id", "tenant_id", name="uq_score_runs_id_tenant"),
+        UniqueConstraint("tenant_id", "analysis_id", name="uq_score_runs_tenant_analysis"),
+        CheckConstraint("score >= 0 AND score <= 100", name="ck_score_runs_score_range"),
+        CheckConstraint(
+            "temperature IN ('HOT', 'WARM', 'COLD')", name="ck_score_runs_temperature"
+        ),
+        Index("ix_score_runs_tenant_lead_created", "tenant_id", "lead_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    lead_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    analysis_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    score: Mapped[int] = mapped_column(nullable=False)
+    temperature: Mapped[str] = mapped_column(String(10), nullable=False)
+    ruleset_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ScoreFactor(Base):
+    __tablename__ = "score_factors"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["score_run_id", "tenant_id"],
+            ["score_runs.id", "score_runs.tenant_id"],
+            ondelete="CASCADE",
+            name="fk_score_factors_run_tenant",
+        ),
+        Index("ix_score_factors_tenant_run", "tenant_id", "score_run_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    score_run_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    factor_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    raw_value: Mapped[str] = mapped_column(Text, nullable=False)
+    contribution: Mapped[int] = mapped_column(nullable=False)
+    explanation: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class NextActionRecommendation(Base):
+    __tablename__ = "next_action_recommendations"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["lead_id", "tenant_id"],
+            ["leads.id", "leads.tenant_id"],
+            ondelete="CASCADE",
+            name="fk_next_actions_lead_tenant",
+        ),
+        ForeignKeyConstraint(
+            ["score_run_id", "tenant_id"],
+            ["score_runs.id", "score_runs.tenant_id"],
+            ondelete="CASCADE",
+            name="fk_next_actions_run_tenant",
+        ),
+        CheckConstraint("priority >= 1 AND priority <= 3", name="ck_next_actions_priority"),
+        Index("ix_next_actions_tenant_lead_created", "tenant_id", "lead_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    lead_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    score_run_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    action_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    priority: Mapped[int] = mapped_column(nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
