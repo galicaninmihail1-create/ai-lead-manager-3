@@ -1,6 +1,7 @@
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from decimal import Decimal
 
 import pytest
 from pydantic import BaseModel, ConfigDict
@@ -29,6 +30,7 @@ from ai_lead_manager.application.ai.contracts import (
 from ai_lead_manager.application.ai.executor import AIExecutor
 from ai_lead_manager.application.ai.money import Currency, Money
 from ai_lead_manager.application.ai.pricing import ModelPricing, PricingCatalog
+from ai_lead_manager.application.ai.provider_cost import ExactProviderCost
 from ai_lead_manager.application.ai.registry import ProviderRegistry
 from ai_lead_manager.application.inbound import InboundIngestionService
 from ai_lead_manager.application.providers import MockQualificationProvider
@@ -370,7 +372,10 @@ def test_provider_reported_rub_cost_is_persisted_exactly(session_factory) -> Non
         update={
             "provider_reported_cost": Money(
                 amount_micros=1_234_567, currency=Currency.RUB
-            )
+            ),
+            "exact_provider_reported_cost": ExactProviderCost.parse(
+                Decimal("1.234567"), Currency.RUB
+            ),
         }
     )
     provider = RecordingStructuredProvider("fake", "model-v1", lambda _request: result)
@@ -390,6 +395,7 @@ def test_provider_reported_rub_cost_is_persisted_exactly(session_factory) -> Non
         )
         assert call.actual_cost_micros == 14
         assert call.cost_currency == "RUB"
+        assert call.provider_reported_cost_decimal == Decimal("1.234567")
         assert call.provider_reported_cost_micros == 1_234_567
         assert call.provider_reported_cost_currency == "RUB"
 
@@ -528,6 +534,12 @@ def test_retry_matrix_is_explicit_and_bounded(
                 AIErrorKind.MALFORMED_OUTPUT,
                 "bad json",
                 usage=AIUsage(input_tokens=10, output_tokens=3),
+                provider_reported_cost=Money(
+                    amount_micros=13, currency=Currency.USD
+                ),
+                exact_provider_reported_cost=ExactProviderCost.parse(
+                    Decimal("0.00001234"), Currency.USD
+                ),
             ),
             AIErrorKind.MALFORMED_OUTPUT,
         ),
@@ -558,6 +570,14 @@ def test_invalid_structured_output_records_known_usage_without_retry(
         assert operation.actual_cost_micros == 16
         assert call.cost_known is True
         assert call.error_kind == expected_kind.value
+        if expected_kind == AIErrorKind.MALFORMED_OUTPUT:
+            assert call.provider_reported_cost_decimal == Decimal("0.00001234")
+            assert call.provider_reported_cost_micros == 13
+            assert call.provider_reported_cost_currency == "USD"
+        else:
+            assert call.provider_reported_cost_decimal is None
+            assert call.provider_reported_cost_micros is None
+            assert call.provider_reported_cost_currency is None
 
 
 def test_safe_qualification_finalizes_and_replays_outside_request_transaction(

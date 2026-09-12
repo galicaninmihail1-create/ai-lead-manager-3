@@ -488,6 +488,11 @@ class AIExecutor:
                     cached_tokens=result.usage.cached_tokens,
                     actual_cost_micros=actual_cost.amount_micros,
                     cost_currency=actual_cost.currency.value,
+                    provider_reported_cost_decimal=(
+                        result.exact_provider_reported_cost.amount
+                        if result.exact_provider_reported_cost is not None
+                        else None
+                    ),
                     provider_reported_cost_micros=(
                         result.provider_reported_cost.amount_micros
                         if result.provider_reported_cost is not None
@@ -619,6 +624,11 @@ class AIExecutor:
                     cached_tokens=error.usage.cached_tokens if error.usage else None,
                     actual_cost_micros=actual_cost.amount_micros if cost_known else None,
                     cost_currency=price.currency.value,
+                    provider_reported_cost_decimal=(
+                        error.exact_provider_reported_cost.amount
+                        if error.exact_provider_reported_cost is not None
+                        else None
+                    ),
                     provider_reported_cost_micros=(
                         error.provider_reported_cost.amount_micros
                         if error.provider_reported_cost is not None

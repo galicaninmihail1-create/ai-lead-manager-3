@@ -2,12 +2,13 @@ import os
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
 
 import pytest
 from alembic import command
 from alembic.config import Config
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import create_engine, delete, select, text
+from sqlalchemy import create_engine, delete, inspect, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
@@ -255,6 +256,155 @@ def test_postgres_currency_migration_preserves_legacy_usd_semantics(monkeypatch)
                 {"operation_id": operation_id},
             ).one()
             assert migrated_call == (45, "USD", None, None)
+        schema_engine.dispose()
+    finally:
+        get_settings.cache_clear()
+        with engine.begin() as connection:
+            connection.execute(DropSchema(schema, cascade=True, if_exists=True))
+        engine.dispose()
+
+
+def test_exact_provider_cost_migration_round_trip_and_constraints(monkeypatch) -> None:
+    base_url = make_url(os.environ["DATABASE_URL"])
+    schema = f"exact_cost_migration_{uuid.uuid4().hex}"
+    engine = create_engine(base_url)
+    schema_url = base_url.update_query_dict({"options": f"-csearch_path={schema}"})
+    migration_config = Config("alembic.ini")
+    try:
+        with engine.begin() as connection:
+            connection.execute(CreateSchema(schema))
+        migration_url = (
+            f"{base_url.render_as_string(hide_password=False)}"
+            f"?options=-csearch_path={schema}"
+        )
+        monkeypatch.setenv("DATABASE_URL", migration_url)
+        get_settings.cache_clear()
+        command.upgrade(migration_config, "20260912_0009")
+
+        schema_engine = create_engine(schema_url)
+        tenant_id = uuid.uuid4()
+        operation_id = uuid.uuid4()
+        historical_call_id = uuid.uuid4()
+        with schema_engine.begin() as connection:
+            connection.execute(
+                text("INSERT INTO tenants (id, name, slug) VALUES (:id, 'Exact cost', :slug)"),
+                {"id": tenant_id, "slug": f"exact-cost-{tenant_id.hex}"},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO ai_operations "
+                    "(id, tenant_id, operation_type, idempotency_key, request_hash, provider, "
+                    "model, pricing_version, status, estimated_max_cost_micros, "
+                    "reserved_cost_micros, actual_cost_micros, cost_currency) VALUES "
+                    "(:id, :tenant_id, 'QUALIFICATION', 'exact-cost', :request_hash, 'fake', "
+                    "'model', 'v1', 'CALLING', 100, 100, 0, 'RUB')"
+                ),
+                {"id": operation_id, "tenant_id": tenant_id, "request_hash": "c" * 64},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO provider_calls "
+                    "(id, tenant_id, operation_id, attempt, provider, model, status, "
+                    "cost_currency, cost_known) VALUES "
+                    "(:id, :tenant_id, :operation_id, 1, 'fake', 'model', 'FAILED', "
+                    "'RUB', true)"
+                ),
+                {
+                    "id": historical_call_id,
+                    "tenant_id": tenant_id,
+                    "operation_id": operation_id,
+                },
+            )
+
+        command.upgrade(migration_config, "head")
+        column = next(
+            item
+            for item in inspect(schema_engine).get_columns("provider_calls")
+            if item["name"] == "provider_reported_cost_decimal"
+        )
+        assert column["nullable"] is True
+        assert column["type"].precision == 32
+        assert column["type"].scale == 18
+
+        insert_reported = text(
+            "INSERT INTO provider_calls "
+            "(id, tenant_id, operation_id, attempt, provider, model, status, cost_currency, "
+            "provider_reported_cost_decimal, provider_reported_cost_micros, "
+            "provider_reported_cost_currency, cost_known) VALUES "
+            "(:id, :tenant_id, :operation_id, :attempt, 'fake', 'model', 'FAILED', 'RUB', "
+            ":decimal, :micros, :currency, true)"
+        )
+        exact_values = [Decimal("0.04131306"), Decimal("0.123456789012345678")]
+        with schema_engine.begin() as connection:
+            for attempt, exact in enumerate(exact_values, start=2):
+                connection.execute(
+                    insert_reported,
+                    {
+                        "id": uuid.uuid4(),
+                        "tenant_id": tenant_id,
+                        "operation_id": operation_id,
+                        "attempt": attempt,
+                        "decimal": exact,
+                        "micros": 41_314 if attempt == 2 else 123_457,
+                        "currency": "RUB",
+                    },
+                )
+            persisted = connection.execute(
+                text(
+                    "SELECT provider_reported_cost_decimal FROM provider_calls "
+                    "WHERE operation_id = :operation_id AND attempt IN (2, 3) ORDER BY attempt"
+                ),
+                {"operation_id": operation_id},
+            ).scalars().all()
+            historical = connection.execute(
+                text(
+                    "SELECT provider_reported_cost_decimal FROM provider_calls WHERE id = :id"
+                ),
+                {"id": historical_call_id},
+            ).scalar_one()
+        assert persisted == exact_values
+        assert historical is None
+
+        invalid_states = [
+            (Decimal("0.1"), None, None),
+            (None, 100_000, None),
+            (None, None, "RUB"),
+            (Decimal("0.1"), 100_000, None),
+            (Decimal("0.1"), None, "RUB"),
+            (None, 100_000, "RUB"),
+            (Decimal("-0.1"), 100_000, "RUB"),
+        ]
+        for offset, (decimal, micros, currency) in enumerate(invalid_states, start=4):
+            with pytest.raises(IntegrityError), schema_engine.begin() as connection:
+                connection.execute(
+                    insert_reported,
+                    {
+                        "id": uuid.uuid4(),
+                        "tenant_id": tenant_id,
+                        "operation_id": operation_id,
+                        "attempt": offset,
+                        "decimal": decimal,
+                        "micros": micros,
+                        "currency": currency,
+                    },
+                )
+
+        command.downgrade(migration_config, "20260912_0009")
+        assert "provider_reported_cost_decimal" not in {
+            item["name"] for item in inspect(schema_engine).get_columns("provider_calls")
+        }
+        with schema_engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO provider_calls "
+                    "(id, tenant_id, operation_id, attempt, provider, model, status, "
+                    "cost_currency, provider_reported_cost_micros, "
+                    "provider_reported_cost_currency, cost_known) VALUES "
+                    "(:id, :tenant_id, :operation_id, 9, 'fake', 'model', 'FAILED', "
+                    "'RUB', 100000, 'RUB', true)"
+                ),
+                {"id": uuid.uuid4(), "tenant_id": tenant_id, "operation_id": operation_id},
+            )
         schema_engine.dispose()
     finally:
         get_settings.cache_clear()

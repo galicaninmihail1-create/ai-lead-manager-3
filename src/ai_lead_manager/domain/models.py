@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     JSON,
@@ -21,6 +22,31 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql import func
+from sqlalchemy.types import TypeDecorator
+
+
+class _ExactDecimal(TypeDecorator[Decimal]):
+    """Exact NUMERIC in PostgreSQL with a lossless SQLite test-backend variant."""
+
+    impl = Numeric(32, 18)
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == "sqlite":
+            return dialect.type_descriptor(String(33))
+        return dialect.type_descriptor(Numeric(32, 18))
+
+    def process_bind_param(self, value: Decimal | None, dialect):
+        if value is None:
+            return None
+        if not isinstance(value, Decimal):
+            raise TypeError("Exact decimal database values must use Decimal")
+        return format(value, "f") if dialect.name == "sqlite" else value
+
+    def process_result_value(self, value, dialect) -> Decimal | None:
+        if value is None:
+            return None
+        return value if isinstance(value, Decimal) else Decimal(value)
 
 
 class Base(DeclarativeBase):
@@ -614,9 +640,13 @@ class ProviderCall(Base):
         ),
         CheckConstraint("cost_currency IN ('USD', 'RUB')", name="ck_provider_calls_currency"),
         CheckConstraint(
-            "(provider_reported_cost_micros IS NULL AND "
+            "(provider_reported_cost_decimal IS NULL AND "
+            "provider_reported_cost_micros IS NULL AND "
             "provider_reported_cost_currency IS NULL) OR "
-            "(provider_reported_cost_micros IS NOT NULL AND "
+            "(provider_reported_cost_decimal IS NOT NULL AND "
+            "provider_reported_cost_decimal >= 0 AND "
+            "provider_reported_cost_micros IS NOT NULL AND "
+            "provider_reported_cost_currency IS NOT NULL AND "
             "provider_reported_cost_currency IN ('USD', 'RUB'))",
             name="ck_provider_calls_reported_cost",
         ),
@@ -642,6 +672,9 @@ class ProviderCall(Base):
     cached_tokens: Mapped[int | None] = mapped_column(Integer)
     actual_cost_micros: Mapped[int | None] = mapped_column(BigInteger)
     cost_currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    provider_reported_cost_decimal: Mapped[Decimal | None] = mapped_column(
+        _ExactDecimal()
+    )
     provider_reported_cost_micros: Mapped[int | None] = mapped_column(BigInteger)
     provider_reported_cost_currency: Mapped[str | None] = mapped_column(String(3))
     cost_known: Mapped[bool] = mapped_column(Boolean, nullable=False)
