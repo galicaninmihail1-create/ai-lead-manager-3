@@ -5,12 +5,14 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from sqlalchemy.orm import Session
 
+from ai_lead_manager.api.auth import BearerCredentials, trusted_context_for_scope
 from ai_lead_manager.application.ai.contracts import (
     AIErrorKind,
     AIExecutionError,
     AIProviderError,
     BudgetExceededError,
 )
+from ai_lead_manager.application.api_keys import APIKeyScope
 from ai_lead_manager.application.drafts import MockDraftProvider
 from ai_lead_manager.application.inbound import InboundIngestionService
 from ai_lead_manager.application.providers import MockQualificationProvider
@@ -95,10 +97,14 @@ def qualify_lead(
     request: QualificationRequest,
     session: Annotated[Session, Depends(get_session)],
     idempotency_key: IdempotencyHeader = None,
+    credentials: BearerCredentials = None,
 ) -> QualificationResponse:
+    tenant = trusted_context_for_scope(
+        session, request.tenant_id, credentials, APIKeyScope.AI_QUALIFY
+    )
     service = QualificationService(
-        TenantContext.untrusted(request.tenant_id),
-        SqlAlchemyQualificationRepository(session, request.tenant_id),
+        tenant,
+        SqlAlchemyQualificationRepository(session, tenant.tenant_id),
         SqlAlchemyUnitOfWork(session),
         MockQualificationProvider(),
         get_ai_executor(),
@@ -116,10 +122,15 @@ def qualify_lead(
         raise ai_http_error(error) from error
 
 
-def workflow_service(session: Session, tenant_id: uuid.UUID) -> SalesWorkflowService:
+def workflow_service(
+    session: Session,
+    tenant_id: uuid.UUID,
+    tenant_context: TenantContext | None = None,
+) -> SalesWorkflowService:
+    tenant = tenant_context or TenantContext.untrusted(tenant_id)
     return SalesWorkflowService(
-        TenantContext.untrusted(tenant_id),
-        SqlAlchemyWorkflowRepository(session, tenant_id),
+        tenant,
+        SqlAlchemyWorkflowRepository(session, tenant.tenant_id),
         SqlAlchemyUnitOfWork(session),
         MockDraftProvider(),
         get_ai_executor(),
@@ -167,8 +178,12 @@ def generate_draft(
     request: TenantActorRequest,
     session: Annotated[Session, Depends(get_session)],
     idempotency_key: IdempotencyHeader = None,
+    credentials: BearerCredentials = None,
 ) -> ResponseDraftResponse:
-    service = workflow_service(session, request.tenant_id)
+    tenant = trusted_context_for_scope(
+        session, request.tenant_id, credentials, APIKeyScope.AI_DRAFT
+    )
+    service = workflow_service(session, tenant.tenant_id, tenant)
     return workflow_result(
         lambda: service.generate_draft(
             lead_id,

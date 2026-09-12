@@ -151,7 +151,10 @@ Tenant API keys имеют формат `alm_sk_<12 hex chars>_<43 base64url cha
 создаётся через `secrets` и возвращается только при создании. В БД сохраняются prefix и
 HMAC-SHA256 полного ключа с обязательным server-side `TENANT_API_KEY_PEPPER`; plaintext и
 pepper не сохраняются. Поддерживаются только scopes `ai:qualify` и `ai:draft`, отзыв и
-опциональное время истечения. HTTP-аутентификация будет добавлена отдельно в Stage 5C-1B.
+опциональное время истечения. LIVE qualification/draft принимают ключ через стандартный
+`Authorization: Bearer` (`HTTPBearer`), после успешной проверки создают server-owned trusted
+`TenantContext` и проверяют operation scope до budget reservation или provider transport.
+Body `tenant_id` остаётся лишь lookup-кандидатом и не может создать trusted context без ключа.
 
 ## Docker
 

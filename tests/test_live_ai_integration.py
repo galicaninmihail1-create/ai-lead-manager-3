@@ -25,6 +25,11 @@ from ai_lead_manager.application.ai.contracts import (
     ProviderDisabledError,
     UnknownCostError,
 )
+from ai_lead_manager.application.api_keys import (
+    APIKeyCreate,
+    TenantAPIKeyCredentialService,
+    TenantAPIKeyService,
+)
 from ai_lead_manager.application.drafts import MockDraftProvider
 from ai_lead_manager.application.inbound import InboundIngestionService
 from ai_lead_manager.application.providers import MockQualificationProvider
@@ -61,6 +66,7 @@ from ai_lead_manager.infrastructure.database import get_session
 from ai_lead_manager.infrastructure.repositories import (
     SqlAlchemyInboundRepository,
     SqlAlchemyQualificationRepository,
+    SqlAlchemyTenantAPIKeyRepository,
     SqlAlchemyTenantRepository,
     SqlAlchemyUnitOfWork,
     SqlAlchemyWorkflowRepository,
@@ -951,4 +957,102 @@ def test_postgres_concurrent_fake_live_duplicate_has_one_http_call() -> None:
         if tenant_id is not None:
             with factory.begin() as session:
                 session.execute(delete(Tenant).where(Tenant.id == tenant_id))
+        engine.dispose()
+
+
+@postgres_only
+def test_postgres_http_bearer_fake_live_smoke(monkeypatch) -> None:
+    from ai_lead_manager.api import auth, routes
+    from ai_lead_manager.main import app
+
+    engine = create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    tenant_ids: list[uuid.UUID] = []
+    fake_http = FakeOpenAIHTTP()
+    pepper = "stage5c1b-postgres-smoke-pepper"
+    try:
+        with factory() as session:
+            runtime = runtime_for(session, fake_http)
+            tenant_id, lead_id = seed_live_lead(
+                session, slug=f"pg-http-auth-{uuid.uuid4().hex}"
+            )
+            foreign_tenant_id, foreign_lead_id = seed_live_lead(
+                session, slug=f"pg-http-auth-foreign-{uuid.uuid4().hex}"
+            )
+            tenant_ids.extend([tenant_id, foreign_tenant_id])
+            key_service = TenantAPIKeyService(
+                tenant_id,
+                SqlAlchemyTenantAPIKeyRepository(session, tenant_id),
+                SqlAlchemyUnitOfWork(session),
+                TenantAPIKeyCredentialService(pepper),
+            )
+            qualify_key = key_service.create(
+                APIKeyCreate(label="Smoke qualify", scopes={"ai:qualify"})
+            )
+            draft_key = key_service.create(
+                APIKeyCreate(label="Smoke draft", scopes={"ai:draft"})
+            )
+            monkeypatch.setattr(routes, "get_ai_executor", lambda: runtime)
+            monkeypatch.setattr(
+                auth,
+                "get_settings",
+                lambda: Settings(_env_file=None, tenant_api_key_pepper=pepper),
+            )
+            app.dependency_overrides[get_session] = lambda: session
+            client = TestClient(app)
+
+            headers = {
+                "Authorization": f"Bearer {qualify_key.api_key}",
+                "Idempotency-Key": "http-live-qualification",
+            }
+            first = client.post(
+                f"/api/v1/leads/{lead_id}/qualify",
+                headers=headers,
+                json={"tenant_id": str(tenant_id)},
+            )
+            replay = client.post(
+                f"/api/v1/leads/{lead_id}/qualify",
+                headers=headers,
+                json={"tenant_id": str(tenant_id)},
+            )
+            denied = client.post(
+                f"/api/v1/leads/{lead_id}/drafts",
+                headers={
+                    "Authorization": f"Bearer {qualify_key.api_key}",
+                    "Idempotency-Key": "scope-denied-draft",
+                },
+                json={"tenant_id": str(tenant_id)},
+            )
+            foreign = client.post(
+                f"/api/v1/leads/{foreign_lead_id}/qualify",
+                headers={
+                    "Authorization": f"Bearer {qualify_key.api_key}",
+                    "Idempotency-Key": "foreign-lead",
+                },
+                json={"tenant_id": str(tenant_id)},
+            )
+            key_service.revoke(qualify_key.metadata.id)
+            revoked = client.post(
+                f"/api/v1/leads/{lead_id}/qualify",
+                headers={
+                    "Authorization": f"Bearer {qualify_key.api_key}",
+                    "Idempotency-Key": "revoked-key",
+                },
+                json={"tenant_id": str(tenant_id)},
+            )
+
+            assert first.status_code == 200
+            assert replay.status_code == 200 and replay.json()["replayed"] is True
+            assert fake_http.call_count == 1
+            assert denied.status_code == 403
+            assert foreign.status_code == 404
+            assert revoked.status_code == 401
+            assert session.scalar(select(func.count()).select_from(AIOperation)) == 1
+            assert session.scalar(select(func.count()).select_from(ProviderCall)) == 1
+            assert draft_key.metadata.status == "ACTIVE"
+    finally:
+        app.dependency_overrides.clear()
+        if tenant_ids:
+            with factory.begin() as session:
+                session.execute(delete(Tenant).where(Tenant.id.in_(tenant_ids)))
         engine.dispose()
