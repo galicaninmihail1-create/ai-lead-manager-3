@@ -1,0 +1,11 @@
+[
+  {
+    "provider": "polza",
+    "model": "lead-structured-v1",
+    "version": "polza-gpt41mini-rub-20260912-r1",
+    "currency": "RUB",
+    "input_price_micros_per_million_tokens": 48540000,
+    "output_price_micros_per_million_tokens": 194160000,
+    "cached_price_micros_per_million_tokens": 48540000
+  }
+]

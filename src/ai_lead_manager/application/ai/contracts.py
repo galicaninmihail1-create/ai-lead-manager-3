@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ai_lead_manager.application.ai.money import Money
 
@@ -57,6 +57,12 @@ class AIUsage(BaseModel):
     input_tokens: int = Field(ge=0)
     output_tokens: int = Field(ge=0)
     cached_tokens: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def cached_tokens_are_part_of_input(self) -> AIUsage:
+        if self.cached_tokens > self.input_tokens:
+            raise ValueError("Cached tokens cannot exceed input tokens")
+        return self
 
 
 class ProviderMetadata(BaseModel):

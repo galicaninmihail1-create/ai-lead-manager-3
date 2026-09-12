@@ -11,7 +11,7 @@
         "accepted_provider_models": [
           "openai/gpt-4.1-mini"
         ],
-        "pricing_version": "polza-gpt-4.1-mini-unpriced",
+        "pricing_version": "polza-gpt41mini-rub-20260912-r1",
         "capabilities": [
           "qualification",
           "draft",

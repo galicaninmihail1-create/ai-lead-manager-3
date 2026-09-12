@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from ai_lead_manager.application.ai.contracts import AIErrorKind, AIUsage, UnknownCostError
-from ai_lead_manager.application.ai.money import Currency, Money
+from ai_lead_manager.application.ai.money import POSTGRES_BIGINT_MAX, Currency, Money
 
 MICROS_PER_UNIT = 1_000_000
 
@@ -28,9 +28,14 @@ class ModelPricing:
             not self.provider
             or not self.model
             or not self.version
-            or any(type(value) is not int or value < 0 for value in values)
+            or any(
+                type(value) is not int or not 0 <= value <= POSTGRES_BIGINT_MAX
+                for value in values
+            )
         ):
-            raise ValueError("Model pricing must be named, versioned, and non-negative")
+            raise ValueError(
+                "Model pricing must be named, versioned, non-negative, and fit PostgreSQL BIGINT"
+            )
 
     @staticmethod
     def _charge(tokens: int, rate: int) -> int:

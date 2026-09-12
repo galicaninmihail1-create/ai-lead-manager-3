@@ -134,8 +134,16 @@ infrastructure. Deployments may pass its JSON value through
 `AI_OPENAI_COMPATIBLE_PROVIDERS_JSON`; the credential is referenced only by the
 `POLZA_AI_API_KEY` environment-variable name.
 
-The profile intentionally contains no pricing and does not activate LIVE for any tenant.
-It remains fail-closed until matching versioned RUB pricing and tenant policy are configured.
+The immutable server-controlled pricing snapshot is tracked in
+`config/polza-pricing-20260912-r1.json` for loading through `AI_MODEL_PRICING_JSON`.
+Version `polza-gpt41mini-rub-20260912-r1` fixes input at `48_540_000` and output at
+`194_160_000` micro-RUB per million tokens. Its cached-input rate is deliberately the normal
+input rate, `48_540_000`, as a conservative reservation safety rate because Polza's exact
+cache-read tariff has not been authoritatively confirmed; this is not a claim about the
+provider's actual tariff, and cached input is never assumed free. Any future authoritative
+cache price or other rate change must use a new pricing version and must not alter this snapshot.
+
+The profile and snapshot do not activate LIVE for any tenant.
 
 ## Executor integration (Stage 5B-2)
 

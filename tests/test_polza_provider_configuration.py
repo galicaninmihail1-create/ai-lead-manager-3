@@ -5,9 +5,13 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
-from ai_lead_manager.application.ai.contracts import AIOperationType
+from ai_lead_manager.application.ai.contracts import AIOperationType, AIUsage
+from ai_lead_manager.application.ai.money import Currency, Money
 from ai_lead_manager.config import Settings
-from ai_lead_manager.infrastructure.ai.composition import build_provider_registry
+from ai_lead_manager.infrastructure.ai.composition import (
+    build_pricing_catalog,
+    build_provider_registry,
+)
 from ai_lead_manager.infrastructure.ai.openai_compatible.config import (
     OpenAICompatibleProviderCatalog,
     OpenAICompatibleProviderConfig,
@@ -26,6 +30,8 @@ from ai_lead_manager.infrastructure.ai.openai_compatible.transport import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 POLZA_CONFIGURATION_PATH = PROJECT_ROOT / "config" / "polza-provider.json"
+POLZA_PRICING_PATH = PROJECT_ROOT / "config" / "polza-pricing-20260912-r1.json"
+POLZA_PRICING_VERSION = "polza-gpt41mini-rub-20260912-r1"
 OFFLINE_TEST_SECRET = "offline-polza-registration-test-secret"
 
 
@@ -95,8 +101,29 @@ def test_polza_registers_existing_adapters_without_http() -> None:
         assert isinstance(draft, OpenAICompatibleDraftProvider)
         assert registry.route(
             AIOperationType.QUALIFICATION, "polza", "lead-structured-v1"
-        ).pricing_version == "polza-gpt-4.1-mini-unpriced"
+        ).pricing_version == POLZA_PRICING_VERSION
         assert requests == []
+
+
+def test_polza_immutable_pricing_snapshot_matches_route_and_exact_rub_rates() -> None:
+    settings = Settings(
+        _env_file=None,
+        ai_model_pricing_json=POLZA_PRICING_PATH.read_text(encoding="utf-8"),
+    )
+    price = build_pricing_catalog(settings).get("polza", "lead-structured-v1")
+    route = polza_provider_config().models[0]
+
+    assert price.version == route.pricing_version == POLZA_PRICING_VERSION
+    assert price.currency is Currency.RUB
+    assert price.input_price_micros_per_million_tokens == 48_540_000
+    assert price.output_price_micros_per_million_tokens == 194_160_000
+    assert price.cached_price_micros_per_million_tokens == 48_540_000
+    assert price.actual_cost(AIUsage(input_tokens=1_000_000, output_tokens=0)) == Money(
+        amount_micros=48_540_000, currency=Currency.RUB
+    )
+    assert price.actual_cost(AIUsage(input_tokens=0, output_tokens=1_000_000)) == Money(
+        amount_micros=194_160_000, currency=Currency.RUB
+    )
 
 
 @pytest.mark.parametrize(

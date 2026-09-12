@@ -13,7 +13,12 @@ from ai_lead_manager.application.ai.contracts import (
     ProviderDisabledError,
     UnknownCostError,
 )
-from ai_lead_manager.application.ai.money import Currency, CurrencyMismatchError, Money
+from ai_lead_manager.application.ai.money import (
+    POSTGRES_BIGINT_MAX,
+    Currency,
+    CurrencyMismatchError,
+    Money,
+)
 from ai_lead_manager.application.ai.pricing import ModelPricing, PricingCatalog
 
 
@@ -76,6 +81,55 @@ def test_rub_pricing_and_cached_token_arithmetic_are_exact() -> None:
     assert pricing.worst_case_cost(10, 5, 2) == Money(
         amount_micros=58, currency=Currency.RUB
     )
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected_micros"),
+    [
+        (AIUsage(input_tokens=0, output_tokens=0), 0),
+        (AIUsage(input_tokens=1, output_tokens=0), 49),
+        (AIUsage(input_tokens=12_345, output_tokens=0), 599_227),
+        (AIUsage(input_tokens=10, output_tokens=0, cached_tokens=10), 486),
+        (AIUsage(input_tokens=17, output_tokens=3, cached_tokens=5), 1_409),
+    ],
+)
+def test_polza_pricing_uses_integer_ceiling_per_token_class(
+    usage: AIUsage, expected_micros: int
+) -> None:
+    pricing = ModelPricing(
+        "polza",
+        "lead-structured-v1",
+        "polza-gpt41mini-rub-20260912-r1",
+        Currency.RUB,
+        48_540_000,
+        194_160_000,
+        48_540_000,
+    )
+
+    cost = pricing.actual_cost(usage)
+    assert cost == Money(amount_micros=expected_micros, currency=Currency.RUB)
+    assert isinstance(cost.amount_micros, int)
+
+
+def test_cached_tokens_cannot_exceed_input_tokens() -> None:
+    with pytest.raises(ValueError, match="Cached tokens cannot exceed input tokens"):
+        AIUsage(input_tokens=2, output_tokens=0, cached_tokens=3)
+
+
+def test_money_and_pricing_reject_values_above_postgres_bigint() -> None:
+    Money(amount_micros=POSTGRES_BIGINT_MAX, currency=Currency.RUB)
+    with pytest.raises(ValueError):
+        Money(amount_micros=POSTGRES_BIGINT_MAX + 1, currency=Currency.RUB)
+    with pytest.raises(ValueError, match="fit PostgreSQL BIGINT"):
+        ModelPricing("provider", "model", "v1", Currency.RUB, POSTGRES_BIGINT_MAX + 1, 0, 0)
+
+
+def test_cost_result_cannot_exceed_postgres_bigint() -> None:
+    pricing = ModelPricing(
+        "provider", "model", "v1", Currency.RUB, POSTGRES_BIGINT_MAX, 0, 0
+    )
+    with pytest.raises(ValueError):
+        pricing.actual_cost(AIUsage(input_tokens=1_000_001, output_tokens=0))
 
 
 def test_money_never_combines_or_compares_different_currencies() -> None:

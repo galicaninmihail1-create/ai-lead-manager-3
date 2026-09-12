@@ -4,6 +4,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+POSTGRES_BIGINT_MAX = 2**63 - 1
+
 
 class Currency(StrEnum):
     USD = "USD"
@@ -17,7 +19,7 @@ class CurrencyMismatchError(ValueError):
 class Money(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    amount_micros: int = Field(ge=0, strict=True)
+    amount_micros: int = Field(ge=0, le=POSTGRES_BIGINT_MAX, strict=True)
     currency: Currency
 
     def _require_same_currency(self, other: Money) -> None:
