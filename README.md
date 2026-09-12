@@ -126,6 +126,17 @@ Prompts имеют фиксированные версии, отделяют sys
 возвращает только структурированные факты без Lead Score. Draft обязан быть
 русскоязычным и остаётся только черновиком для обязательного human approval.
 
+### Polza provider profile (Stage 5C-2A2.2)
+
+Server-controlled profile `config/polza-provider.json` registers provider alias `polza`
+and internal model alias `lead-structured-v1` through the existing OpenAI-compatible
+infrastructure. Deployments may pass its JSON value through
+`AI_OPENAI_COMPATIBLE_PROVIDERS_JSON`; the credential is referenced only by the
+`POLZA_AI_API_KEY` environment-variable name.
+
+The profile intentionally contains no pricing and does not activate LIVE for any tenant.
+It remains fail-closed until matching versioned RUB pricing and tenant policy are configured.
+
 ## Executor integration (Stage 5B-2)
 
 Composition root объединяет MOCK и LIVE реализации в operation-aware `ProviderRegistry`,

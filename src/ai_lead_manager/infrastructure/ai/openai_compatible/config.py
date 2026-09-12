@@ -81,6 +81,13 @@ class OpenAICompatibleProviderConfig(BaseModel):
             raise ValueError("Credential reference must be an uppercase environment variable name")
         return value
 
+    @field_validator("chat_completions_path")
+    @classmethod
+    def reject_duplicate_path_separators(cls, value: str) -> str:
+        if "//" in value:
+            raise ValueError("Chat completions path cannot contain duplicate slashes")
+        return value
+
     @field_validator("safe_retry_http_statuses")
     @classmethod
     def validate_safe_statuses(cls, value: frozenset[int]) -> frozenset[int]:

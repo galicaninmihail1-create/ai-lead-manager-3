@@ -1,0 +1,23 @@
+[
+  {
+    "alias": "polza",
+    "base_url": "https://polza.ai/api",
+    "api_key_env_var": "POLZA_AI_API_KEY",
+    "chat_completions_path": "/v1/chat/completions",
+    "models": [
+      {
+        "alias": "lead-structured-v1",
+        "upstream_model": "openai/gpt-4.1-mini",
+        "accepted_provider_models": [
+          "openai/gpt-4.1-mini"
+        ],
+        "pricing_version": "polza-gpt-4.1-mini-unpriced",
+        "capabilities": [
+          "qualification",
+          "draft",
+          "strict_structured_output"
+        ]
+      }
+    ]
+  }
+]

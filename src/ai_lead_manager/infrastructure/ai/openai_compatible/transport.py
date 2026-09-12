@@ -57,8 +57,12 @@ class OpenAICompatibleHTTPTransport:
         if self._owns_client:
             self._client.close()
 
+    @property
+    def chat_completions_url(self) -> str:
+        base_url = str(self._config.base_url).rstrip("/")
+        return f"{base_url}{self._config.chat_completions_path}"
+
     def post_chat_completion(self, payload: dict[str, Any]) -> OpenAIWireResponse:
-        url = f"{str(self._config.base_url).rstrip('/')}{self._config.chat_completions_path}"
         body = json.dumps(
             payload,
             ensure_ascii=False,
@@ -74,7 +78,7 @@ class OpenAICompatibleHTTPTransport:
         try:
             with self._client.stream(
                 "POST",
-                url,
+                self.chat_completions_url,
                 content=body,
                 headers=headers,
                 timeout=self._timeout,
