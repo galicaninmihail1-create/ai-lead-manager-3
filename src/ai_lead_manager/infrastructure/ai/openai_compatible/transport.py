@@ -4,6 +4,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from email.utils import parsedate_to_datetime
 from typing import Any
 
@@ -173,7 +174,7 @@ class OpenAICompatibleHTTPTransport:
             ) from error
 
         try:
-            decoded = json.loads(response_body)
+            decoded = json.loads(response_body, parse_float=Decimal)
         except (json.JSONDecodeError, UnicodeDecodeError) as error:
             raise AIProviderError(
                 AIErrorKind.MALFORMED_OUTPUT,

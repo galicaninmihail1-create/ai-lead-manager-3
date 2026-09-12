@@ -2,6 +2,7 @@ import json
 import socket
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -728,6 +729,28 @@ def test_malformed_outer_response_is_rejected(response, kind: AIErrorKind) -> No
     with pytest.raises(AIProviderError) as captured:
         provider.execute(qualification_request())
     assert captured.value.kind == kind
+
+
+def test_transport_decodes_outer_decimal_exactly_without_changing_integers() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b'{"usage":{"cost_rub":0.04131306,"prompt_tokens":31}}',
+            headers={"content-type": "application/json"},
+            request=request,
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler), trust_env=False) as client:
+        transport = OpenAICompatibleHTTPTransport(
+            provider_config(), SecretStr(TEST_SECRET), client=client
+        )
+        wire = transport.post_chat_completion({"safe": True})
+
+    assert wire.payload["usage"]["cost_rub"] == Decimal("0.04131306")
+    assert isinstance(wire.payload["usage"]["cost_rub"], Decimal)
+    assert not isinstance(wire.payload["usage"]["cost_rub"], float)
+    assert wire.payload["usage"]["prompt_tokens"] == 31
+    assert type(wire.payload["usage"]["prompt_tokens"]) is int
 
 
 def test_oversized_response_is_stopped_at_configured_limit() -> None:

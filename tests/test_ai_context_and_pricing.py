@@ -1,3 +1,5 @@
+from decimal import ROUND_DOWN, Decimal, localcontext
+
 import pytest
 
 from ai_lead_manager.application.ai.circuit import CircuitBreaker, CircuitState
@@ -20,6 +22,7 @@ from ai_lead_manager.application.ai.money import (
     Money,
 )
 from ai_lead_manager.application.ai.pricing import ModelPricing, PricingCatalog
+from ai_lead_manager.application.ai.provider_cost import ExactProviderCost
 
 
 def test_bounded_context_keeps_newest_messages_deterministically() -> None:
@@ -130,6 +133,64 @@ def test_cost_result_cannot_exceed_postgres_bigint() -> None:
     )
     with pytest.raises(ValueError):
         pricing.actual_cost(AIUsage(input_tokens=1_000_001, output_tokens=0))
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected_micros"),
+    [
+        (Decimal("0"), 0),
+        (Decimal("0.000001"), 1),
+        (Decimal("0.00000001"), 1),
+        (Decimal("1"), 1_000_000),
+        (Decimal("0.04131306"), 41_314),
+        (Decimal("0.123456789012345678"), 123_457),
+        (Decimal("9000000000000"), 9_000_000_000_000_000_000),
+        ("4.131306e-2", 41_314),
+    ],
+)
+def test_exact_provider_cost_normalizes_up_without_float(
+    raw: Decimal | str, expected_micros: int
+) -> None:
+    cost = ExactProviderCost.parse(raw, Currency.RUB)
+
+    assert cost.normalized_money == Money(
+        amount_micros=expected_micros, currency=Currency.RUB
+    )
+    assert isinstance(cost.amount, Decimal)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        Decimal("0.1234567890123456789"),
+        Decimal("100000000000000"),
+        Decimal("-0.01"),
+        Decimal("NaN"),
+        Decimal("Infinity"),
+        "not-a-number",
+        0.04131306,
+        True,
+    ],
+)
+def test_exact_provider_cost_rejects_invalid_or_unbounded_values(raw: object) -> None:
+    with pytest.raises(ValueError):
+        ExactProviderCost.parse(raw, Currency.RUB)  # type: ignore[arg-type]
+
+
+def test_exact_provider_cost_rejects_normalized_bigint_overflow() -> None:
+    with pytest.raises(ValueError, match="PostgreSQL BIGINT"):
+        ExactProviderCost.parse(9_223_372_036_855, Currency.RUB)
+
+
+def test_exact_provider_cost_ignores_ambient_decimal_rounding() -> None:
+    with localcontext() as context:
+        context.prec = 2
+        context.rounding = ROUND_DOWN
+        normalized = ExactProviderCost.parse(
+            Decimal("0.04131306"), Currency.RUB
+        ).normalized_money
+
+    assert normalized.amount_micros == 41_314
 
 
 def test_money_never_combines_or_compares_different_currencies() -> None:
