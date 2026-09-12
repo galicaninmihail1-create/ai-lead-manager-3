@@ -27,6 +27,7 @@ from ai_lead_manager.application.ai.contracts import (
     UnknownCostError,
 )
 from ai_lead_manager.application.ai.executor import AIExecutor
+from ai_lead_manager.application.ai.money import Currency, Money
 from ai_lead_manager.application.ai.pricing import ModelPricing, PricingCatalog
 from ai_lead_manager.application.ai.registry import ProviderRegistry
 from ai_lead_manager.application.inbound import InboundIngestionService
@@ -85,6 +86,7 @@ def add_policy(
     monthly: int = 1_000_000,
     per_call: int = 1_000_000,
     max_attempts: int = 2,
+    currency: Currency = Currency.USD,
 ) -> uuid.UUID:
     tenant_id = uuid.uuid4()
     with factory.begin() as session:
@@ -98,8 +100,9 @@ def add_policy(
                 qualification_model=model,
                 draft_provider=provider,
                 draft_model=model,
-                monthly_limit_microusd=monthly,
-                per_call_limit_microusd=per_call,
+                monthly_limit_micros=monthly,
+                per_call_limit_micros=per_call,
+                budget_currency=currency.value,
                 max_input_tokens=1_000,
                 max_output_tokens=100,
                 max_attempts=max_attempts,
@@ -154,6 +157,7 @@ def build_executor(
                     provider.provider_name,
                     provider.model_name,
                     "test-v1",
+                    Currency.USD,
                     1_000_000,
                     2_000_000,
                     0,
@@ -180,7 +184,7 @@ def finalize(factory: sessionmaker[Session], tenant_id: uuid.UUID, operation_id:
     with factory.begin() as session:
         operation = session.get(AIOperation, operation_id)
         operation.status = AIOperationStatus.SUCCEEDED.value
-        operation.reserved_cost_microusd = 0
+        operation.reserved_cost_micros = 0
 
 
 def test_mock_is_default_and_untrusted_context_can_execute(session_factory) -> None:
@@ -308,6 +312,88 @@ def test_budget_rejection_occurs_before_provider_and_is_audited(session_factory)
         ) == 0
 
 
+def test_rub_worst_case_monthly_and_per_call_limits(session_factory) -> None:
+    rub_price = ModelPricing(
+        "fake", "model-v1", "rub-v1", Currency.RUB, 1_000_000, 2_000_000, 0
+    )
+    tenant_id = add_policy(
+        session_factory,
+        monthly=79,
+        per_call=100,
+        currency=Currency.RUB,
+    )
+    provider = RecordingStructuredProvider("fake", "model-v1", lambda _request: success())
+    executor = build_executor(session_factory, provider, prices=[rub_price])
+
+    execute(executor, tenant_id, "rub-first")
+    with pytest.raises(BudgetExceededError):
+        execute(executor, tenant_id, "rub-monthly-limit")
+
+    with session_factory() as session:
+        operation = session.scalar(
+            select(AIOperation).where(AIOperation.tenant_id == tenant_id)
+        )
+        assert operation.cost_currency == "RUB"
+        assert operation.estimated_max_cost_micros == 40
+        assert operation.actual_cost_micros + operation.reserved_cost_micros == 40
+
+    per_call_tenant = add_policy(
+        session_factory,
+        monthly=1_000,
+        per_call=39,
+        currency=Currency.RUB,
+    )
+    with pytest.raises(BudgetExceededError):
+        execute(executor, per_call_tenant, "rub-per-call-limit")
+    assert provider.physical_call_count == 1
+
+
+def test_currency_mismatch_fails_before_provider_execution(session_factory) -> None:
+    tenant_id = add_policy(session_factory, currency=Currency.RUB)
+    provider = RecordingStructuredProvider("fake", "model-v1", lambda _request: success())
+
+    with pytest.raises(UnknownCostError):
+        execute(build_executor(session_factory, provider), tenant_id, "currency-mismatch")
+
+    assert provider.physical_call_count == 0
+    with session_factory() as session:
+        assert session.scalar(
+            select(func.count()).select_from(AIOperation).where(
+                AIOperation.tenant_id == tenant_id
+            )
+        ) == 0
+
+
+def test_provider_reported_rub_cost_is_persisted_exactly(session_factory) -> None:
+    tenant_id = add_policy(session_factory, currency=Currency.RUB)
+    result = success().model_copy(
+        update={
+            "provider_reported_cost": Money(
+                amount_micros=1_234_567, currency=Currency.RUB
+            )
+        }
+    )
+    provider = RecordingStructuredProvider("fake", "model-v1", lambda _request: result)
+    price = ModelPricing(
+        "fake", "model-v1", "rub-v1", Currency.RUB, 1_000_000, 2_000_000, 0
+    )
+
+    execute(
+        build_executor(session_factory, provider, prices=[price]),
+        tenant_id,
+        "provider-reported-rub",
+    )
+
+    with session_factory() as session:
+        call = session.scalar(
+            select(ProviderCall).where(ProviderCall.tenant_id == tenant_id)
+        )
+        assert call.actual_cost_micros == 14
+        assert call.cost_currency == "RUB"
+        assert call.provider_reported_cost_micros == 1_234_567
+        assert call.provider_reported_cost_currency == "RUB"
+
+
 def test_unknown_price_and_disabled_provider_fail_before_call(session_factory) -> None:
     tenant_id = add_policy(session_factory)
     provider = RecordingStructuredProvider("fake", "model-v1", lambda _request: success())
@@ -356,7 +442,7 @@ def test_monthly_hard_budget_counts_committed_and_reserved_cost(session_factory)
         operation = session.scalar(
             select(AIOperation).where(AIOperation.tenant_id == tenant_id)
         )
-        assert operation.actual_cost_microusd + operation.reserved_cost_microusd == 40
+        assert operation.actual_cost_micros + operation.reserved_cost_micros == 40
 
 def test_retry_policy_retries_connect_timeout_but_not_read_timeout(session_factory) -> None:
     tenant_id = add_policy(session_factory)
@@ -388,7 +474,7 @@ def test_retry_policy_retries_connect_timeout_but_not_read_timeout(session_facto
             select(AIOperation).where(AIOperation.tenant_id == second_tenant)
         )
         assert operation.status == "UNKNOWN"
-        assert operation.reserved_cost_microusd == operation.estimated_max_cost_microusd
+        assert operation.reserved_cost_micros == operation.estimated_max_cost_micros
         assert "secret" not in str(
             list(
                 session.scalars(
@@ -468,8 +554,8 @@ def test_invalid_structured_output_records_known_usage_without_retry(
             select(ProviderCall).where(ProviderCall.tenant_id == tenant_id)
         )
         assert operation.status == "FAILED"
-        assert operation.reserved_cost_microusd == 0
-        assert operation.actual_cost_microusd == 16
+        assert operation.reserved_cost_micros == 0
+        assert operation.actual_cost_micros == 16
         assert call.cost_known is True
         assert call.error_kind == expected_kind.value
 
@@ -534,7 +620,7 @@ def test_safe_qualification_finalizes_and_replays_outside_request_transaction(
     with session_factory() as session:
         operation = session.get(AIOperation, first.ai_operation_id)
         assert operation.status == "SUCCEEDED"
-        assert operation.reserved_cost_microusd == 0
+        assert operation.reserved_cost_micros == 0
         assert operation.result_analysis_id == first.analysis_id
         assert session.scalar(
             select(func.count()).select_from(LeadAnalysis).where(
@@ -573,7 +659,7 @@ def test_provider_success_persistence_failure_marks_unknown_without_retry(
             select(AIOperation).where(AIOperation.tenant_id == tenant_id)
         )
         assert operation.status == "UNKNOWN"
-        assert operation.reserved_cost_microusd == operation.estimated_max_cost_microusd
+        assert operation.reserved_cost_micros == operation.estimated_max_cost_micros
         assert session.scalar(select(func.count()).select_from(ProviderCall)) == 0
 
     with pytest.raises(AIOperationNotReplayableError):
@@ -609,6 +695,7 @@ def test_ai_repository_is_tenant_scoped_for_trusted_context(session_factory) -> 
                     provider="fake",
                     model="model-v1",
                     status="FAILED",
+                    cost_currency="USD",
                     cost_known=True,
                 )
             )
@@ -638,7 +725,9 @@ def test_provider_call_happens_with_no_ai_repository_transaction(session_factory
         Settings(_env_file=None),
         ObservedFactory(session_factory),
         ProviderRegistry([provider]),
-        PricingCatalog([ModelPricing("fake", "model-v1", "v1", 1_000_000, 2_000_000, 0)]),
+        PricingCatalog(
+            [ModelPricing("fake", "model-v1", "v1", Currency.USD, 1_000_000, 2_000_000, 0)]
+        ),
         sleeper=lambda _seconds: None,
     )
 
@@ -712,7 +801,7 @@ def test_domain_finalization_failure_marks_operation_unknown(session_factory) ->
         )
         assert operation.status == "UNKNOWN"
         assert operation.error_code == "domain_finalization_failed"
-        assert operation.reserved_cost_microusd > 0
+        assert operation.reserved_cost_micros > 0
         assert session.scalar(
             select(func.count()).select_from(ProviderCall).where(
                 ProviderCall.operation_id == operation.id

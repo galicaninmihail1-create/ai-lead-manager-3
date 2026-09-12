@@ -1,15 +1,20 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from ai_lead_manager.application.ai.contracts import AIErrorKind, BudgetExceededError
+from ai_lead_manager.application.ai.contracts import (
+    AIErrorKind,
+    BudgetExceededError,
+    UnknownCostError,
+)
+from ai_lead_manager.application.ai.money import Currency, CurrencyMismatchError, Money
 from ai_lead_manager.application.ai.ports import AIExecutionRepository
 from ai_lead_manager.domain.models import TenantAIPolicy
 
 
 @dataclass(frozen=True, slots=True)
 class SpendingReservation:
-    amount_microusd: int
-    period_spend_before_microusd: int
+    amount: Money
+    period_spend_before: Money
 
 
 class SpendingGuard:
@@ -22,24 +27,46 @@ class SpendingGuard:
         self,
         repository: AIExecutionRepository,
         policy: TenantAIPolicy,
-        amount_microusd: int,
+        amount: Money,
         *,
         now: datetime | None = None,
     ) -> SpendingReservation:
-        if amount_microusd < 0:
-            raise ValueError("Reservation cannot be negative")
-        if amount_microusd > policy.per_call_limit_microusd:
+        try:
+            budget_currency = Currency(policy.budget_currency)
+        except ValueError as error:
+            raise UnknownCostError(
+                AIErrorKind.UNKNOWN_COST, "Tenant AI budget currency is unsupported"
+            ) from error
+        if amount.currency != budget_currency:
+            raise UnknownCostError(
+                AIErrorKind.UNKNOWN_COST,
+                "Model pricing currency does not match the tenant AI budget currency",
+            )
+        per_call_limit = Money(
+            amount_micros=policy.per_call_limit_micros, currency=budget_currency
+        )
+        monthly_limit = Money(
+            amount_micros=policy.monthly_limit_micros, currency=budget_currency
+        )
+        if amount > per_call_limit:
             raise BudgetExceededError(
                 AIErrorKind.BUDGET_EXCEEDED,
                 "Worst-case AI cost exceeds the tenant per-call limit",
             )
-        current = repository.current_period_spend(self.period_start(now))
-        if current + amount_microusd > policy.monthly_limit_microusd:
+        try:
+            current = repository.current_period_spend(self.period_start(now), budget_currency)
+            projected = current + amount
+        except CurrencyMismatchError as error:
+            raise UnknownCostError(
+                AIErrorKind.UNKNOWN_COST,
+                "Current AI spend currency does not match the tenant budget currency",
+            ) from error
+        if projected > monthly_limit:
             raise BudgetExceededError(
                 AIErrorKind.BUDGET_EXCEEDED,
                 "Worst-case AI cost exceeds the tenant monthly hard limit",
             )
         return SpendingReservation(
-            amount_microusd=amount_microusd,
-            period_spend_before_microusd=current,
+            amount=amount,
+            period_spend_before=current,
         )

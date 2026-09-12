@@ -241,7 +241,7 @@ class SalesWorkflowService:
             if operation is None or operation.status != AIOperationStatus.CALLING.value:
                 raise WorkflowPrerequisiteError("AI operation cannot be finalized")
             operation.status = AIOperationStatus.SUCCEEDED.value
-            operation.reserved_cost_microusd = 0
+            operation.reserved_cost_micros = 0
             operation.result_draft_id = draft.id
             self._audit(
                 "system",

@@ -4,10 +4,14 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import create_engine, delete, select
+from sqlalchemy import create_engine, delete, select, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.schema import CreateSchema, DropSchema
 
 from ai_lead_manager.application.ai.contracts import (
     AIExecutionOutcome,
@@ -20,6 +24,7 @@ from ai_lead_manager.application.ai.contracts import (
     StructuredAIResult,
 )
 from ai_lead_manager.application.ai.executor import AIExecutor
+from ai_lead_manager.application.ai.money import Currency
 from ai_lead_manager.application.ai.pricing import (
     ModelPricing,
     PricingCatalog,
@@ -34,7 +39,7 @@ from ai_lead_manager.application.providers import (
 from ai_lead_manager.application.qualification import QualificationService
 from ai_lead_manager.application.schemas import InboundHttpRequest
 from ai_lead_manager.application.tenant_context import TenantContext
-from ai_lead_manager.config import Settings
+from ai_lead_manager.config import Settings, get_settings
 from ai_lead_manager.domain.models import AIOperation, ProviderCall, Tenant, TenantAIPolicy
 from ai_lead_manager.infrastructure.ai.recording import RecordingStructuredProvider
 from ai_lead_manager.infrastructure.ai.repositories import SqlAlchemyAIRepositoryFactory
@@ -82,6 +87,7 @@ def add_tenant_policy(
     monthly_limit: int,
     provider: str = "pg-fake",
     model: str = "pg-model",
+    currency: Currency = Currency.USD,
 ) -> uuid.UUID:
     tenant_id = uuid.uuid4()
     with Session(engine) as session, session.begin():
@@ -101,8 +107,9 @@ def add_tenant_policy(
                 qualification_model=model,
                 draft_provider=provider,
                 draft_model=model,
-                monthly_limit_microusd=monthly_limit,
-                per_call_limit_microusd=1_000,
+                monthly_limit_micros=monthly_limit,
+                per_call_limit_micros=1_000,
+                budget_currency=currency.value,
                 max_input_tokens=1_000,
                 max_output_tokens=100,
                 max_attempts=2,
@@ -112,14 +119,20 @@ def add_tenant_policy(
     return tenant_id
 
 
-def executor(engine, provider: RecordingStructuredProvider) -> AIExecutor:
+def executor(
+    engine, provider: RecordingStructuredProvider, currency: Currency = Currency.USD
+) -> AIExecutor:
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     return AIExecutor(
         Settings(_env_file=None),
         SqlAlchemyAIRepositoryFactory(factory),
         ProviderRegistry([provider]),
         PricingCatalog(
-            [ModelPricing("pg-fake", "pg-model", "pg-v1", 1_000_000, 2_000_000, 0)]
+            [
+                ModelPricing(
+                    "pg-fake", "pg-model", "pg-v1", currency, 1_000_000, 2_000_000, 0
+                )
+            ]
         ),
         sleeper=lambda _seconds: None,
     )
@@ -144,9 +157,117 @@ def cleanup(engine, tenant_ids: list[uuid.UUID]) -> None:
         session.execute(delete(Tenant).where(Tenant.id.in_(tenant_ids)))
 
 
+def test_postgres_currency_migration_preserves_legacy_usd_semantics(monkeypatch) -> None:
+    base_url = make_url(os.environ["DATABASE_URL"])
+    schema = f"currency_migration_{uuid.uuid4().hex}"
+    engine = create_engine(base_url)
+    schema_url = base_url.update_query_dict({"options": f"-csearch_path={schema}"})
+    migration_config = Config("alembic.ini")
+    try:
+        with engine.begin() as connection:
+            connection.execute(CreateSchema(schema))
+        migration_url = (
+            f"{base_url.render_as_string(hide_password=False)}"
+            f"?options=-csearch_path={schema}"
+        )
+        monkeypatch.setenv("DATABASE_URL", migration_url)
+        get_settings.cache_clear()
+        command.upgrade(migration_config, "20260912_0008")
+
+        schema_engine = create_engine(schema_url)
+        with schema_engine.begin() as connection:
+            tenant_id = uuid.uuid4()
+            operation_id = uuid.uuid4()
+            connection.execute(
+                text(
+                    "INSERT INTO tenants (id, name, slug) VALUES "
+                    "(:tenant_id, 'migration sentinel', :slug)"
+                ),
+                {"tenant_id": tenant_id, "slug": f"migration-{uuid.uuid4().hex}"},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO tenant_ai_policies "
+                    "(tenant_id, enabled, mode, qualification_provider, "
+                    "qualification_model, draft_provider, draft_model, "
+                    "monthly_limit_microusd, per_call_limit_microusd, "
+                    "max_input_tokens, max_output_tokens, max_attempts, allow_unknown_cost) "
+                    "VALUES (:tenant_id, true, 'MOCK', 'mock', 'model', 'mock', 'model', "
+                    "9000000, 900000, 1000, 100, 2, false)"
+                ),
+                {"tenant_id": tenant_id},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO ai_operations "
+                    "(id, tenant_id, operation_type, idempotency_key, request_hash, "
+                    "provider, model, pricing_version, status, estimated_max_cost_microusd, "
+                    "reserved_cost_microusd, actual_cost_microusd) VALUES "
+                    "(:operation_id, :tenant_id, 'QUALIFICATION', 'migration-sentinel', "
+                    ":request_hash, 'mock', 'model', 'v1', 'SUCCEEDED', 123, 0, 45)"
+                ),
+                {
+                    "operation_id": operation_id,
+                    "tenant_id": tenant_id,
+                    "request_hash": "a" * 64,
+                },
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO provider_calls "
+                    "(id, tenant_id, operation_id, attempt, provider, model, status, "
+                    "actual_cost_microusd, cost_known) VALUES "
+                    "(:call_id, :tenant_id, :operation_id, 1, 'mock', 'model', "
+                    "'SUCCEEDED', 45, true)"
+                ),
+                {
+                    "call_id": uuid.uuid4(),
+                    "tenant_id": tenant_id,
+                    "operation_id": operation_id,
+                },
+            )
+
+        command.upgrade(migration_config, "head")
+        with schema_engine.connect() as connection:
+            migrated = connection.execute(
+                text(
+                    "SELECT monthly_limit_micros, per_call_limit_micros, budget_currency "
+                    "FROM tenant_ai_policies WHERE tenant_id = :tenant_id"
+                ),
+                {"tenant_id": tenant_id},
+            ).one()
+            assert migrated == (9_000_000, 900_000, "USD")
+            migrated_operation = connection.execute(
+                text(
+                    "SELECT estimated_max_cost_micros, reserved_cost_micros, "
+                    "actual_cost_micros, cost_currency FROM ai_operations "
+                    "WHERE id = :operation_id"
+                ),
+                {"operation_id": operation_id},
+            ).one()
+            assert migrated_operation == (123, 0, 45, "USD")
+            migrated_call = connection.execute(
+                text(
+                    "SELECT actual_cost_micros, cost_currency, "
+                    "provider_reported_cost_micros, provider_reported_cost_currency "
+                    "FROM provider_calls WHERE operation_id = :operation_id"
+                ),
+                {"operation_id": operation_id},
+            ).one()
+            assert migrated_call == (45, "USD", None, None)
+        schema_engine.dispose()
+    finally:
+        get_settings.cache_clear()
+        with engine.begin() as connection:
+            connection.execute(DropSchema(schema, cascade=True, if_exists=True))
+        engine.dispose()
+
+
 def test_postgres_concurrent_budget_reservations_never_exceed_hard_limit() -> None:
     engine = create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
-    tenant_id = add_tenant_policy(engine, monthly_limit=40)
+    tenant_id = add_tenant_policy(
+        engine, monthly_limit=40, currency=Currency.RUB
+    )
     entered_provider = threading.Event()
     release_provider = threading.Event()
 
@@ -156,7 +277,7 @@ def test_postgres_concurrent_budget_reservations_never_exceed_hard_limit() -> No
         return success()
 
     provider = RecordingStructuredProvider("pg-fake", "pg-model", blocking_success)
-    runtime = executor(engine, provider)
+    runtime = executor(engine, provider, Currency.RUB)
     try:
         with ThreadPoolExecutor(max_workers=2) as pool:
             first = pool.submit(execute, runtime, tenant_id, "budget-a")
@@ -176,8 +297,8 @@ def test_postgres_concurrent_budget_reservations_never_exceed_hard_limit() -> No
             )
             assert len(operations) == 1
             assert sum(
-                (operation.actual_cost_microusd or 0)
-                + operation.reserved_cost_microusd
+                (operation.actual_cost_micros or 0)
+                + operation.reserved_cost_micros
                 for operation in operations
             ) == 40
     finally:
@@ -249,9 +370,10 @@ def test_postgres_ai_operation_and_call_constraints_enforce_tenant_scope() -> No
                     model="pg-model",
                     pricing_version="pg-v1",
                     status="CALLING",
-                    estimated_max_cost_microusd=40,
-                    reserved_cost_microusd=40,
-                    actual_cost_microusd=0,
+                    estimated_max_cost_micros=40,
+                    reserved_cost_micros=40,
+                    actual_cost_micros=0,
+                    cost_currency="USD",
                 )
             )
 
@@ -265,6 +387,7 @@ def test_postgres_ai_operation_and_call_constraints_enforce_tenant_scope() -> No
                         provider="pg-fake",
                         model="pg-model",
                         status="FAILED",
+                        cost_currency="USD",
                         cost_known=True,
                     )
                 )
@@ -350,15 +473,15 @@ def test_postgres_offline_stage5a_smoke() -> None:
             operation = session.get(AIOperation, first.ai_operation_id)
             assert operation.status == "SUCCEEDED"
             assert operation.result_analysis_id == first.analysis_id
-            assert operation.actual_cost_microusd > 0
-            assert operation.reserved_cost_microusd == 0
+            assert operation.actual_cost_micros > 0
+            assert operation.reserved_cost_micros == 0
             call = session.scalar(
                 select(ProviderCall).where(ProviderCall.operation_id == operation.id)
             )
             assert call.status == "SUCCEEDED"
             assert call.cost_known is True
-            assert call.actual_cost_microusd == operation.actual_cost_microusd
-            session.get(TenantAIPolicy, tenant_id).per_call_limit_microusd = 0
+            assert call.actual_cost_micros == operation.actual_cost_micros
+            session.get(TenantAIPolicy, tenant_id).per_call_limit_micros = 0
 
         with factory() as session:
             over_budget = QualificationService(

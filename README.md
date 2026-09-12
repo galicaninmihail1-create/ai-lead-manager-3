@@ -72,7 +72,8 @@ Development endpoints сохраняют прежний локальный mock-
 request hash переиспользуют сохранённый результат, другой hash даёт conflict, а
 `CALLING`/`UNKNOWN` никогда не запускаются повторно автоматически.
 
-Денежные значения хранятся только целыми micro-USD. Перед вызовом tenant policy
+Денежные значения хранятся целыми micros с явной валютой `USD` или `RUB`; FX-конвертация
+не выполняется, а смешение валют блокируется. Перед вызовом tenant policy
 блокируется `SELECT ... FOR UPDATE`, рассчитывается сумма actual + reserved за текущий
 месяц и атомарно резервируется worst-case стоимость input/output и разрешённых попыток.
 При неизвестной цене вызов запрещается. Для `UNKNOWN` резерв сохраняется до будущего
@@ -137,7 +138,8 @@ upstream model или цену. LIVE pricing задаётся отдельным
 schema/prompt versions. Hash включает operation, lead/analysis, provider/model и ограниченный
 semantic payload. HTTP всегда выполняется после commit прикладной транзакции. Каждая физическая
 попытка получает отдельный `ProviderCall`; сохраняются upstream model, usage, cached tokens,
-request ID, finish reason, latency, exact micro-USD cost и cost-known status.
+request ID, finish reason, latency, exact currency-aware cost, опциональная
+provider-reported стоимость и cost-known status.
 
 Аудит связывает reservation, attempt start/result, retry, circuit rejection, budget rejection,
 domain finalization и `UNKNOWN`. Malformed output не запускает repair-вызов; неоднозначный
@@ -158,7 +160,8 @@ Body `tenant_id` остаётся лишь lookup-кандидатом и не �
 
 `POST /api/v1/ai/readiness` принимает только operation и lead ID, а tenant получает из
 проверенного Bearer key. Preflight ограничивает qualification/draft context, разрешает
-server-owned route/pricing, считает worst-case micro-USD и доступный бюджет, возвращает
+server-owned route/pricing, считает currency-aware worst-case стоимость и доступный бюджет,
+возвращает денежные объекты `{amount_micros, currency}`,
 машиночитаемые blockers и не резервирует средства, не создаёт AI ledger и не вызывает provider.
 
 ## Docker

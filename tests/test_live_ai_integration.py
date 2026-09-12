@@ -80,7 +80,10 @@ TEST_KEY = "stage5b2-fake-credential-never-real"
 
 
 def live_settings(
-    *, configured_pricing_version: str = PRICING_VERSION, **overrides
+    *,
+    configured_pricing_version: str = PRICING_VERSION,
+    pricing_currency: str = "USD",
+    **overrides,
 ) -> Settings:
     provider_configuration = [
         {
@@ -108,9 +111,10 @@ def live_settings(
             "provider": PROVIDER_ALIAS,
             "model": MODEL_ALIAS,
             "version": configured_pricing_version,
-            "input_microusd_per_million_tokens": 1_000_000,
-            "output_microusd_per_million_tokens": 2_000_000,
-            "cached_microusd_per_million_tokens": 250_000,
+            "currency": pricing_currency,
+            "input_price_micros_per_million_tokens": 1_000_000,
+            "output_price_micros_per_million_tokens": 2_000_000,
+            "cached_price_micros_per_million_tokens": 250_000,
         }
     ]
     values = {
@@ -228,6 +232,7 @@ def seed_live_lead(
     max_attempts: int = 2,
     per_call_limit: int = 100_000,
     monthly_limit: int = 1_000_000,
+    budget_currency: str = "USD",
 ) -> tuple[uuid.UUID, uuid.UUID]:
     tenant_id = TenantService(
         SqlAlchemyTenantRepository(session), SqlAlchemyUnitOfWork(session)
@@ -241,8 +246,9 @@ def seed_live_lead(
             qualification_model=MODEL_ALIAS,
             draft_provider=PROVIDER_ALIAS,
             draft_model=MODEL_ALIAS,
-            monthly_limit_microusd=monthly_limit,
-            per_call_limit_microusd=per_call_limit,
+            monthly_limit_micros=monthly_limit,
+            per_call_limit_micros=per_call_limit,
+            budget_currency=budget_currency,
             max_input_tokens=1_000,
             max_output_tokens=100,
             max_attempts=max_attempts,
@@ -413,17 +419,17 @@ def test_full_fake_live_qualification_draft_accounting_and_replay(
     )
     assert len(operations) == 2
     assert {operation.status for operation in operations} == {"SUCCEEDED"}
-    assert all(operation.reserved_cost_microusd == 0 for operation in operations)
+    assert all(operation.reserved_cost_micros == 0 for operation in operations)
     operation_types = {operation.id: operation.operation_type for operation in operations}
     calls_by_type = {operation_types[call.operation_id]: call for call in calls}
     qualification_call = calls_by_type["QUALIFICATION"]
     draft_call = calls_by_type["DRAFT"]
-    assert qualification_call.actual_cost_microusd == 133
+    assert qualification_call.actual_cost_micros == 133
     assert qualification_call.input_tokens == 100
     assert qualification_call.output_tokens == 20
     assert qualification_call.cached_tokens == 10
     assert qualification_call.provider_request_id == "fake-request-1"
-    assert draft_call.actual_cost_microusd == 60
+    assert draft_call.actual_cost_micros == 60
     assert draft_call.input_tokens == 40
     assert draft_call.output_tokens == 10
     assert draft_call.cached_tokens == 0
@@ -601,7 +607,7 @@ def test_ambiguous_read_timeout_is_unknown_and_never_blindly_replayed(
     )
     assert operation is not None
     assert operation.status == "UNKNOWN"
-    assert operation.reserved_cost_microusd == operation.estimated_max_cost_microusd
+    assert operation.reserved_cost_micros == operation.estimated_max_cost_micros
     call = session.scalar(
         select(ProviderCall).where(ProviderCall.operation_id == operation.id)
     )
@@ -741,10 +747,10 @@ def test_schema_invalid_paid_output_is_recorded_once_without_repair_call(
         select(ProviderCall).where(ProviderCall.operation_id == operation.id)
     )
     assert operation.status == "FAILED"
-    assert operation.actual_cost_microusd == 133
-    assert operation.reserved_cost_microusd == 0
+    assert operation.actual_cost_micros == 133
+    assert operation.reserved_cost_micros == 0
     assert call.error_kind == "schema_validation"
-    assert call.actual_cost_microusd == 133
+    assert call.actual_cost_micros == 133
     assert call.provider_model == UPSTREAM_MODEL
     assert call.finish_reason == "stop"
 
@@ -877,7 +883,7 @@ def test_postgres_full_fake_live_smoke_and_replay() -> None:
             assert len(operations) == 2
             assert len(calls) == 2
             assert {operation.status for operation in operations} == {"SUCCEEDED"}
-            assert sorted(call.actual_cost_microusd for call in calls) == [60, 133]
+            assert sorted(call.actual_cost_micros for call in calls) == [60, 133]
             assert all(call.provider_model == UPSTREAM_MODEL for call in calls)
             assert all(call.cost_known is True for call in calls)
             assert session.scalar(
@@ -1016,8 +1022,8 @@ def test_postgres_http_bearer_fake_live_smoke(monkeypatch) -> None:
             assert session.scalar(select(func.count()).select_from(ProviderCall)) == 0
 
             policy = session.get(TenantAIPolicy, tenant_id)
-            original_limit = policy.per_call_limit_microusd
-            policy.per_call_limit_microusd = 0
+            original_limit = policy.per_call_limit_micros
+            policy.per_call_limit_micros = 0
             session.commit()
             budget_blocked = client.post(
                 "/api/v1/ai/readiness",
@@ -1028,7 +1034,7 @@ def test_postgres_http_bearer_fake_live_smoke(monkeypatch) -> None:
             assert "per_call_limit_exceeded" in {
                 blocker["code"] for blocker in budget_blocked.json()["blockers"]
             }
-            policy.per_call_limit_microusd = original_limit
+            policy.per_call_limit_micros = original_limit
             session.commit()
 
             runtime.settings.ai_kill_switch = True

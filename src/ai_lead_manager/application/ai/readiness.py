@@ -11,6 +11,7 @@ from ai_lead_manager.application.ai.context import (
 )
 from ai_lead_manager.application.ai.contracts import AIOperationType
 from ai_lead_manager.application.ai.executor import AIExecutor
+from ai_lead_manager.application.ai.money import Currency, Money
 from ai_lead_manager.application.api_keys import APIKeyScope
 from ai_lead_manager.application.drafts import DraftContext
 from ai_lead_manager.application.tenant_context import TenantContext
@@ -39,9 +40,9 @@ class LiveAIReadinessResult(BaseModel):
     model_alias: str | None = None
     pricing_version: str | None = None
     credential_configured: bool = False
-    estimated_max_cost_microusd: int | None = None
-    remaining_monthly_budget_microusd: int | None = None
-    per_call_limit_microusd: int | None = None
+    estimated_max_cost: Money | None = None
+    remaining_monthly_budget: Money | None = None
+    per_call_limit: Money | None = None
     required_scope: str
     estimated_input_tokens: int | None = None
     max_input_tokens: int | None = None
@@ -91,6 +92,12 @@ class LiveAIReadinessService:
         if self.settings.ai_kill_switch:
             block("kill_switch_active", "Global AI kill switch is active")
 
+        try:
+            budget_currency = Currency(policy.budget_currency)
+        except ValueError:
+            budget_currency = None
+            block("currency_mismatch", "Tenant AI budget currency is unsupported")
+
         provider, model = (
             (policy.qualification_provider, policy.qualification_model)
             if operation == AIOperationType.QUALIFICATION
@@ -109,6 +116,12 @@ class LiveAIReadinessService:
             price = self.executor.pricing.get(provider, model)
             if route is not None and route.pricing_version != price.version:
                 block("pricing_unknown", "Pricing version does not match the provider route")
+                price = None
+            elif budget_currency is None or price.currency != budget_currency:
+                block(
+                    "currency_mismatch",
+                    "Model pricing currency does not match the tenant AI budget currency",
+                )
                 price = None
         except Exception:
             block("pricing_unknown", "Server-controlled model pricing is unavailable")
@@ -182,28 +195,55 @@ class LiveAIReadinessService:
         if price is not None and estimated_tokens is not None:
             estimate = price.worst_case_cost(estimated_tokens, output_limit, attempts)
         period_start = self.executor.spending_guard.period_start(datetime.now(UTC))
-        spent = int(
-            self.session.scalar(
-                select(
-                    func.coalesce(
-                        func.sum(
-                            func.coalesce(AIOperation.actual_cost_microusd, 0)
-                            + AIOperation.reserved_cost_microusd
-                        ),
-                        0,
-                    )
-                ).where(
+        operation_currencies = set(
+            self.session.scalars(
+                select(AIOperation.cost_currency)
+                .where(
                     AIOperation.tenant_id == tenant.tenant_id,
                     AIOperation.created_at >= period_start,
                 )
+                .distinct()
             )
-            or 0
         )
-        remaining = max(policy.monthly_limit_microusd - spent, 0)
-        if estimate is not None:
-            if estimate > policy.per_call_limit_microusd:
+        remaining = None
+        per_call_limit = None
+        if budget_currency is not None:
+            mismatched = operation_currencies - {budget_currency.value}
+            if mismatched:
+                block(
+                    "currency_mismatch",
+                    "Current AI spend currency does not match the tenant budget currency",
+                )
+            else:
+                spent = int(
+                    self.session.scalar(
+                        select(
+                            func.coalesce(
+                                func.sum(
+                                    func.coalesce(AIOperation.actual_cost_micros, 0)
+                                    + AIOperation.reserved_cost_micros
+                                ),
+                                0,
+                            )
+                        ).where(
+                            AIOperation.tenant_id == tenant.tenant_id,
+                            AIOperation.created_at >= period_start,
+                        )
+                    )
+                    or 0
+                )
+                remaining = Money(
+                    amount_micros=max(policy.monthly_limit_micros - spent, 0),
+                    currency=budget_currency,
+                )
+            per_call_limit = Money(
+                amount_micros=policy.per_call_limit_micros,
+                currency=budget_currency,
+            )
+        if estimate is not None and per_call_limit is not None:
+            if estimate > per_call_limit:
                 block("per_call_limit_exceeded", "Worst-case cost exceeds the per-call limit")
-            if estimate > remaining:
+            if remaining is not None and estimate > remaining:
                 block("monthly_budget_exceeded", "Worst-case cost exceeds remaining monthly budget")
 
         return LiveAIReadinessResult(
@@ -213,9 +253,9 @@ class LiveAIReadinessService:
             model_alias=model,
             pricing_version=price.version if price is not None else None,
             credential_configured=route is not None and route.execution_mode.value == "LIVE",
-            estimated_max_cost_microusd=estimate,
-            remaining_monthly_budget_microusd=remaining,
-            per_call_limit_microusd=policy.per_call_limit_microusd,
+            estimated_max_cost=estimate,
+            remaining_monthly_budget=remaining,
+            per_call_limit=per_call_limit,
             required_scope=required.value,
             estimated_input_tokens=estimated_tokens,
             max_input_tokens=input_limit,

@@ -246,7 +246,7 @@ class QualificationService:
             if operation is None or operation.status != AIOperationStatus.CALLING.value:
                 raise QualificationUnavailableError("AI operation cannot be finalized")
             operation.status = AIOperationStatus.SUCCEEDED.value
-            operation.reserved_cost_microusd = 0
+            operation.reserved_cost_micros = 0
             operation.result_analysis_id = analysis.id
             self.repository.add_audit(
                 AuditEvent(

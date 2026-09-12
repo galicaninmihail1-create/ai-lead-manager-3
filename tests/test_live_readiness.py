@@ -41,7 +41,10 @@ def test_ready_qualification_exact_preview_and_zero_side_effects(session: Sessio
         min(policy.max_attempts, settings.ai_max_attempts),
     )
     assert result.ready is True
-    assert result.estimated_max_cost_microusd == expected
+    assert result.estimated_max_cost == expected
+    assert result.estimated_max_cost.currency.value == "USD"
+    assert result.remaining_monthly_budget.currency.value == "USD"
+    assert result.per_call_limit.currency.value == "USD"
     assert result.credential_configured is True
     assert_zero_side_effects(session, fake_http)
 
@@ -82,6 +85,33 @@ def test_ready_draft_and_operation_scope(session: Session) -> None:
     )
     assert ready.ready is True and ready.required_scope == "ai:draft"
     assert "missing_scope" in codes(denied)
+    assert_zero_side_effects(session, fake_http)
+
+
+def test_readiness_returns_explicit_rub_money(session: Session) -> None:
+    fake_http = FakeOpenAIHTTP()
+    settings = live_settings(pricing_currency="RUB")
+    executor = runtime_for(session, fake_http, settings)
+    tenant_id, lead_id = seed_live_lead(
+        session,
+        slug="readiness-rub",
+        budget_currency="RUB",
+    )
+
+    result = LiveAIReadinessService(session, executor, settings).check(
+        TenantContext.trusted_context(tenant_id),
+        AIOperationType.QUALIFICATION,
+        lead_id,
+        frozenset({APIKeyScope.AI_QUALIFY}),
+    )
+
+    assert result.ready is True
+    assert result.model_dump(mode="json")["estimated_max_cost"] == {
+        "amount_micros": result.estimated_max_cost.amount_micros,
+        "currency": "RUB",
+    }
+    assert result.remaining_monthly_budget.currency.value == "RUB"
+    assert result.per_call_limit.currency.value == "RUB"
     assert_zero_side_effects(session, fake_http)
 
 

@@ -13,6 +13,7 @@ from ai_lead_manager.application.ai.contracts import (
     ProviderDisabledError,
     UnknownCostError,
 )
+from ai_lead_manager.application.ai.money import Currency, CurrencyMismatchError, Money
 from ai_lead_manager.application.ai.pricing import ModelPricing, PricingCatalog
 
 
@@ -46,12 +47,52 @@ def test_request_hash_is_canonical() -> None:
 
 
 def test_integer_cost_arithmetic_is_exact() -> None:
-    pricing = ModelPricing("mock", "model", "v1", 1_000_000, 2_000_000, 250_000)
+    pricing = ModelPricing(
+        "mock", "model", "v1", Currency.USD, 1_000_000, 2_000_000, 250_000
+    )
     usage = AIUsage(input_tokens=10, output_tokens=3, cached_tokens=4)
 
-    assert pricing.actual_cost(usage) == 13
-    assert pricing.worst_case_cost(10, 5, 2) == 40
-    assert isinstance(pricing.actual_cost(usage), int)
+    assert pricing.actual_cost(usage) == Money(amount_micros=13, currency=Currency.USD)
+    assert pricing.worst_case_cost(10, 5, 2) == Money(
+        amount_micros=40, currency=Currency.USD
+    )
+    assert isinstance(pricing.actual_cost(usage).amount_micros, int)
+
+
+def test_rub_pricing_and_cached_token_arithmetic_are_exact() -> None:
+    pricing = ModelPricing(
+        "polza-compatible",
+        "rub-model",
+        "rub-v1",
+        Currency.RUB,
+        1_500_001,
+        2_500_003,
+        500_007,
+    )
+
+    assert pricing.actual_cost(
+        AIUsage(input_tokens=1_000_000, output_tokens=3, cached_tokens=250_000)
+    ) == Money(amount_micros=1_250_011, currency=Currency.RUB)
+    assert pricing.worst_case_cost(10, 5, 2) == Money(
+        amount_micros=58, currency=Currency.RUB
+    )
+
+
+def test_money_never_combines_or_compares_different_currencies() -> None:
+    usd = Money(amount_micros=1, currency=Currency.USD)
+    rub = Money(amount_micros=1, currency=Currency.RUB)
+
+    with pytest.raises(CurrencyMismatchError):
+        _ = usd + rub
+    with pytest.raises(CurrencyMismatchError):
+        _ = usd < rub
+    with pytest.raises(CurrencyMismatchError):
+        _ = usd == rub
+
+
+def test_money_rejects_float_amounts() -> None:
+    with pytest.raises(ValueError):
+        Money(amount_micros=1.5, currency=Currency.RUB)
 
 
 def test_unknown_price_fails_closed() -> None:

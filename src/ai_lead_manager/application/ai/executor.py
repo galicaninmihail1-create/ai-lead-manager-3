@@ -25,7 +25,9 @@ from ai_lead_manager.application.ai.contracts import (
     ProviderDisabledError,
     ProviderTimeouts,
     StructuredAIRequest,
+    UnknownCostError,
 )
+from ai_lead_manager.application.ai.money import Currency, Money
 from ai_lead_manager.application.ai.ports import AIRepositoryFactory
 from ai_lead_manager.application.ai.pricing import ModelPricing, PricingCatalog
 from ai_lead_manager.application.ai.registry import ProviderRegistry, ProviderRoute
@@ -68,6 +70,7 @@ class AIExecutor:
             route = self._provider_route(policy, operation_type)
             price = self.pricing.get(route.provider, route.model)
             self._validate_pricing_version(route, price)
+            self._validate_pricing_currency(policy, price)
             return route
 
     def requires_idempotency(
@@ -123,6 +126,7 @@ class AIExecutor:
             provider = self.providers.get(provider_name, model_name, operation_type)
             price = self.pricing.get(provider_name, model_name)
             self._validate_pricing_version(route, price)
+            self._validate_pricing_currency(policy, price)
             if route.enforce_request_contract and (
                 request.prompt_version != route.prompt_version
                 or request.schema_version != route.schema_version
@@ -191,7 +195,7 @@ class AIExecutor:
                                 "operation_type": operation_type.value,
                                 "provider": provider_name,
                                 "model": model_name,
-                                "estimated_max_cost_microusd": estimate,
+                                "estimated_max_cost": estimate.model_dump(mode="json"),
                                 "lead_id": str(lead_id) if lead_id is not None else None,
                                 "request_hash": request_hash,
                             },
@@ -209,9 +213,10 @@ class AIExecutor:
                             model=model_name,
                             pricing_version=price.version,
                             status=AIOperationStatus.CALLING.value,
-                            estimated_max_cost_microusd=estimate,
-                            reserved_cost_microusd=reservation.amount_microusd,
-                            actual_cost_microusd=0,
+                            estimated_max_cost_micros=estimate.amount_micros,
+                            reserved_cost_micros=reservation.amount.amount_micros,
+                            actual_cost_micros=0,
+                            cost_currency=estimate.currency.value,
                         )
                     )
                     repository.add_audit(
@@ -220,9 +225,9 @@ class AIExecutor:
                             "ai.operation_reserved",
                             operation,
                             {
-                                "estimated_max_cost_microusd": estimate,
-                                "period_spend_before_microusd": (
-                                    reservation.period_spend_before_microusd
+                                "estimated_max_cost": estimate.model_dump(mode="json"),
+                                "period_spend_before": reservation.period_spend_before.model_dump(
+                                    mode="json"
                                 ),
                             },
                         )
@@ -401,6 +406,20 @@ class AIExecutor:
             )
 
     @staticmethod
+    def _validate_pricing_currency(policy: TenantAIPolicy, price: ModelPricing) -> None:
+        try:
+            budget_currency = Currency(policy.budget_currency)
+        except ValueError as error:
+            raise UnknownCostError(
+                AIErrorKind.UNKNOWN_COST, "Tenant AI budget currency is unsupported"
+            ) from error
+        if price.currency != budget_currency:
+            raise UnknownCostError(
+                AIErrorKind.UNKNOWN_COST,
+                "Model pricing currency does not match the tenant AI budget currency",
+            )
+
+    @staticmethod
     def _existing_outcome(
         operation: AIOperation, request_hash: str
     ) -> AIExecutionOutcome:
@@ -447,7 +466,7 @@ class AIExecutor:
         attempt: int,
         reserved_operation: AIOperation,
         result,
-        actual_cost: int,
+        actual_cost: Money,
     ) -> None:
         with self.repository_factory.transaction(tenant.tenant_id) as repository:
             operation = repository.get_operation_for_update(operation_id)
@@ -467,14 +486,27 @@ class AIExecutor:
                     input_tokens=result.usage.input_tokens,
                     output_tokens=result.usage.output_tokens,
                     cached_tokens=result.usage.cached_tokens,
-                    actual_cost_microusd=actual_cost,
+                    actual_cost_micros=actual_cost.amount_micros,
+                    cost_currency=actual_cost.currency.value,
+                    provider_reported_cost_micros=(
+                        result.provider_reported_cost.amount_micros
+                        if result.provider_reported_cost is not None
+                        else None
+                    ),
+                    provider_reported_cost_currency=(
+                        result.provider_reported_cost.currency.value
+                        if result.provider_reported_cost is not None
+                        else None
+                    ),
                     cost_known=True,
                     finish_reason=result.metadata.finish_reason,
                 )
             )
-            operation.actual_cost_microusd = (operation.actual_cost_microusd or 0) + actual_cost
-            operation.reserved_cost_microusd = max(
-                operation.estimated_max_cost_microusd - operation.actual_cost_microusd, 0
+            operation.actual_cost_micros = (
+                operation.actual_cost_micros or 0
+            ) + actual_cost.amount_micros
+            operation.reserved_cost_micros = max(
+                operation.estimated_max_cost_micros - operation.actual_cost_micros, 0
             )
             repository.add_audit(
                 self._audit(
@@ -483,7 +515,7 @@ class AIExecutor:
                     operation,
                     {
                         "attempt": attempt,
-                        "actual_cost_microusd": actual_cost,
+                        "actual_cost": actual_cost.model_dump(mode="json"),
                         "provider_request_id": result.metadata.provider_request_id,
                     },
                 )
@@ -558,7 +590,11 @@ class AIExecutor:
             operation = repository.get_operation_for_update(operation_id)
             if operation is None:
                 raise RuntimeError("Reserved AI operation disappeared")
-            actual_cost = price.actual_cost(error.usage) if error.usage is not None else 0
+            actual_cost = (
+                price.actual_cost(error.usage)
+                if error.usage is not None
+                else Money.zero(price.currency)
+            )
             cost_known = error.cost_known
             call_status = (
                 ProviderCallStatus.UNKNOWN.value
@@ -581,15 +617,28 @@ class AIExecutor:
                     input_tokens=error.usage.input_tokens if error.usage else None,
                     output_tokens=error.usage.output_tokens if error.usage else None,
                     cached_tokens=error.usage.cached_tokens if error.usage else None,
-                    actual_cost_microusd=actual_cost if cost_known else None,
+                    actual_cost_micros=actual_cost.amount_micros if cost_known else None,
+                    cost_currency=price.currency.value,
+                    provider_reported_cost_micros=(
+                        error.provider_reported_cost.amount_micros
+                        if error.provider_reported_cost is not None
+                        else None
+                    ),
+                    provider_reported_cost_currency=(
+                        error.provider_reported_cost.currency.value
+                        if error.provider_reported_cost is not None
+                        else None
+                    ),
                     cost_known=cost_known,
                     finish_reason=error.finish_reason,
                 )
             )
             if cost_known:
-                operation.actual_cost_microusd = (operation.actual_cost_microusd or 0) + actual_cost
-                operation.reserved_cost_microusd = max(
-                    operation.estimated_max_cost_microusd - operation.actual_cost_microusd, 0
+                operation.actual_cost_micros = (
+                    operation.actual_cost_micros or 0
+                ) + actual_cost.amount_micros
+                operation.reserved_cost_micros = max(
+                    operation.estimated_max_cost_micros - operation.actual_cost_micros, 0
                 )
             if terminal:
                 unknown = error.ambiguous or not cost_known or error.kind in {
@@ -602,7 +651,7 @@ class AIExecutor:
                 )
                 operation.error_code = error.kind.value
                 if not unknown:
-                    operation.reserved_cost_microusd = 0
+                    operation.reserved_cost_micros = 0
             repository.add_audit(
                 self._audit(
                     tenant,

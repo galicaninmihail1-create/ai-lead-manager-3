@@ -16,6 +16,7 @@ from ai_lead_manager.application.ai.contracts import (
     UnknownCostError,
 )
 from ai_lead_manager.application.ai.executor import AIExecutor
+from ai_lead_manager.application.ai.money import Currency
 from ai_lead_manager.application.ai.pricing import (
     ModelPricing,
     PricingCatalog,
@@ -52,9 +53,10 @@ class ServerModelPricing(BaseModel):
     provider: str = Field(min_length=1, max_length=100, pattern=r"^[a-zA-Z0-9._-]+$")
     model: str = Field(min_length=1, max_length=100, pattern=r"^[a-zA-Z0-9._-]+$")
     version: str = Field(min_length=1, max_length=50)
-    input_microusd_per_million_tokens: int = Field(ge=0)
-    output_microusd_per_million_tokens: int = Field(ge=0)
-    cached_microusd_per_million_tokens: int = Field(ge=0)
+    currency: Currency
+    input_price_micros_per_million_tokens: int = Field(ge=0)
+    output_price_micros_per_million_tokens: int = Field(ge=0)
+    cached_price_micros_per_million_tokens: int = Field(ge=0)
 
     def to_domain(self) -> ModelPricing:
         return ModelPricing(**self.model_dump())

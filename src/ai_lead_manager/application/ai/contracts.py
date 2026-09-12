@@ -7,6 +7,8 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ai_lead_manager.application.ai.money import Money
+
 
 class AIExecutionMode(StrEnum):
     MOCK = "MOCK"
@@ -95,6 +97,7 @@ class StructuredAIResult(BaseModel):
     usage: AIUsage | None = None
     metadata: ProviderMetadata
     latency_ms: int | None = Field(default=None, ge=0)
+    provider_reported_cost: Money | None = None
 
 
 class AIProviderError(Exception):
@@ -113,6 +116,7 @@ class AIProviderError(Exception):
         finish_reason: str | None = None,
         latency_ms: int | None = None,
         cost_known: bool = True,
+        provider_reported_cost: Money | None = None,
     ) -> None:
         super().__init__(message)
         self.kind = kind
@@ -126,6 +130,7 @@ class AIProviderError(Exception):
         self.finish_reason = finish_reason
         self.latency_ms = latency_ms
         self.cost_known = cost_known
+        self.provider_reported_cost = provider_reported_cost
 
 
 class AIExecutionError(Exception):

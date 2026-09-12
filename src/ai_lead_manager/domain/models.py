@@ -489,8 +489,12 @@ class TenantAIPolicy(Base, TimestampMixin):
     __table_args__ = (
         CheckConstraint("mode IN ('MOCK', 'LIVE')", name="ck_tenant_ai_policies_mode"),
         CheckConstraint(
-            "monthly_limit_microusd >= 0 AND per_call_limit_microusd >= 0",
+            "monthly_limit_micros >= 0 AND per_call_limit_micros >= 0",
             name="ck_tenant_ai_policies_cost_limits",
+        ),
+        CheckConstraint(
+            "budget_currency IN ('USD', 'RUB')",
+            name="ck_tenant_ai_policies_budget_currency",
         ),
         CheckConstraint(
             "max_input_tokens > 0 AND max_output_tokens > 0 AND max_attempts > 0",
@@ -507,8 +511,11 @@ class TenantAIPolicy(Base, TimestampMixin):
     qualification_model: Mapped[str] = mapped_column(String(100), nullable=False)
     draft_provider: Mapped[str] = mapped_column(String(100), nullable=False)
     draft_model: Mapped[str] = mapped_column(String(100), nullable=False)
-    monthly_limit_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    per_call_limit_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    monthly_limit_micros: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    per_call_limit_micros: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    budget_currency: Mapped[str] = mapped_column(
+        String(3), default="USD", server_default="USD", nullable=False
+    )
     max_input_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
     max_output_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -551,10 +558,11 @@ class AIOperation(Base, TimestampMixin):
             name="ck_ai_operations_status",
         ),
         CheckConstraint(
-            "estimated_max_cost_microusd >= 0 AND reserved_cost_microusd >= 0 "
-            "AND (actual_cost_microusd IS NULL OR actual_cost_microusd >= 0)",
+            "estimated_max_cost_micros >= 0 AND reserved_cost_micros >= 0 "
+            "AND (actual_cost_micros IS NULL OR actual_cost_micros >= 0)",
             name="ck_ai_operations_costs",
         ),
+        CheckConstraint("cost_currency IN ('USD', 'RUB')", name="ck_ai_operations_currency"),
         Index("ix_ai_operations_tenant_created_status", "tenant_id", "created_at", "status"),
     )
 
@@ -570,9 +578,10 @@ class AIOperation(Base, TimestampMixin):
     model: Mapped[str] = mapped_column(String(100), nullable=False)
     pricing_version: Mapped[str] = mapped_column(String(50), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
-    estimated_max_cost_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    reserved_cost_microusd: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    actual_cost_microusd: Mapped[int | None] = mapped_column(BigInteger)
+    estimated_max_cost_micros: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    reserved_cost_micros: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    actual_cost_micros: Mapped[int | None] = mapped_column(BigInteger)
+    cost_currency: Mapped[str] = mapped_column(String(3), nullable=False)
     result_analysis_id: Mapped[uuid.UUID | None]
     result_draft_id: Mapped[uuid.UUID | None]
     error_code: Mapped[str | None] = mapped_column(String(100))
@@ -598,8 +607,18 @@ class ProviderCall(Base):
             "AND (input_tokens IS NULL OR input_tokens >= 0) "
             "AND (output_tokens IS NULL OR output_tokens >= 0) "
             "AND (cached_tokens IS NULL OR cached_tokens >= 0) "
-            "AND (actual_cost_microusd IS NULL OR actual_cost_microusd >= 0)",
+            "AND (actual_cost_micros IS NULL OR actual_cost_micros >= 0) "
+            "AND (provider_reported_cost_micros IS NULL "
+            "OR provider_reported_cost_micros >= 0)",
             name="ck_provider_calls_metrics",
+        ),
+        CheckConstraint("cost_currency IN ('USD', 'RUB')", name="ck_provider_calls_currency"),
+        CheckConstraint(
+            "(provider_reported_cost_micros IS NULL AND "
+            "provider_reported_cost_currency IS NULL) OR "
+            "(provider_reported_cost_micros IS NOT NULL AND "
+            "provider_reported_cost_currency IN ('USD', 'RUB'))",
+            name="ck_provider_calls_reported_cost",
         ),
         Index("ix_provider_calls_tenant_operation", "tenant_id", "operation_id"),
     )
@@ -621,7 +640,10 @@ class ProviderCall(Base):
     input_tokens: Mapped[int | None] = mapped_column(Integer)
     output_tokens: Mapped[int | None] = mapped_column(Integer)
     cached_tokens: Mapped[int | None] = mapped_column(Integer)
-    actual_cost_microusd: Mapped[int | None] = mapped_column(BigInteger)
+    actual_cost_micros: Mapped[int | None] = mapped_column(BigInteger)
+    cost_currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    provider_reported_cost_micros: Mapped[int | None] = mapped_column(BigInteger)
+    provider_reported_cost_currency: Mapped[str | None] = mapped_column(String(3))
     cost_known: Mapped[bool] = mapped_column(Boolean, nullable=False)
     finish_reason: Mapped[str | None] = mapped_column(String(100))
     created_at: Mapped[datetime] = mapped_column(

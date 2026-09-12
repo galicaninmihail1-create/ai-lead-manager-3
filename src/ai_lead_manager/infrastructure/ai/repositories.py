@@ -6,6 +6,7 @@ from datetime import datetime
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from ai_lead_manager.application.ai.money import Currency, CurrencyMismatchError, Money
 from ai_lead_manager.domain.exceptions import TenantScopeError
 from ai_lead_manager.domain.models import AIOperation, AuditEvent, ProviderCall, TenantAIPolicy
 
@@ -58,13 +59,27 @@ class SqlAlchemyAIExecutionRepository:
     def add_provider_call(self, call: ProviderCall) -> ProviderCall:
         return self._add(call)
 
-    def current_period_spend(self, period_start: datetime) -> int:
+    def current_period_spend(self, period_start: datetime, currency: Currency) -> Money:
+        currencies = set(
+            self.session.scalars(
+                select(AIOperation.cost_currency)
+                .where(
+                    AIOperation.tenant_id == self.tenant_id,
+                    AIOperation.created_at >= period_start,
+                )
+                .distinct()
+            )
+        )
+        if currencies - {currency.value}:
+            raise CurrencyMismatchError(
+                "Current budget period contains AI operations in another currency"
+            )
         total = self.session.scalar(
             select(
                 func.coalesce(
                     func.sum(
-                        func.coalesce(AIOperation.actual_cost_microusd, 0)
-                        + AIOperation.reserved_cost_microusd
+                        func.coalesce(AIOperation.actual_cost_micros, 0)
+                        + AIOperation.reserved_cost_micros
                     ),
                     0,
                 )
@@ -73,7 +88,7 @@ class SqlAlchemyAIExecutionRepository:
                 AIOperation.created_at >= period_start,
             )
         )
-        return int(total or 0)
+        return Money(amount_micros=int(total or 0), currency=currency)
 
     def add_audit(self, event: AuditEvent) -> AuditEvent:
         return self._add(event)
