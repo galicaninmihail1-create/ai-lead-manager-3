@@ -109,6 +109,10 @@ class OpenAICompatibleProviderCatalog:
         if len(self._providers) != len(providers):
             raise ValueError("Provider aliases must be unique")
 
+    @property
+    def providers(self) -> tuple[OpenAICompatibleProviderConfig, ...]:
+        return tuple(self._providers.values())
+
     @classmethod
     def from_json(cls, raw_configuration: str) -> "OpenAICompatibleProviderCatalog":
         try:

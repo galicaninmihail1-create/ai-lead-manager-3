@@ -63,6 +63,9 @@ class PricingCatalog:
             )
         return price
 
+    def combined_with(self, prices: list[ModelPricing]) -> "PricingCatalog":
+        return PricingCatalog([*self._prices.values(), *prices])
+
 
 def default_mock_pricing_catalog() -> PricingCatalog:
     return PricingCatalog(

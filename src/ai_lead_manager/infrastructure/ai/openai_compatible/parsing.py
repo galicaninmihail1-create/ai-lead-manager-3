@@ -44,7 +44,9 @@ def _request_id(payload: dict[str, Any], header_request_id: str | None) -> str |
     return candidate
 
 
-def _usage(payload: dict[str, Any], provider_request_id: str | None) -> AIUsage | None:
+def _usage(
+    payload: dict[str, Any], provider_request_id: str | None, latency_ms: int
+) -> AIUsage | None:
     raw_usage = payload.get("usage")
     if raw_usage is None:
         return None
@@ -56,6 +58,7 @@ def _usage(payload: dict[str, Any], provider_request_id: str | None) -> AIUsage 
             "Provider returned malformed usage metadata",
             ambiguous=True,
             provider_request_id=provider_request_id,
+            latency_ms=latency_ms,
             cost_known=False,
         ) from error
     cached = parsed.prompt_tokens_details.cached_tokens if parsed.prompt_tokens_details else 0
@@ -65,6 +68,7 @@ def _usage(payload: dict[str, Any], provider_request_id: str | None) -> AIUsage 
             "Provider returned inconsistent usage metadata",
             ambiguous=True,
             provider_request_id=provider_request_id,
+            latency_ms=latency_ms,
             cost_known=False,
         )
     return AIUsage(
@@ -81,12 +85,18 @@ def _output_error(
     provider_request_id: str | None,
     *,
     ambiguous: bool = False,
+    provider_model: str | None = None,
+    finish_reason: str | None = None,
+    latency_ms: int | None = None,
 ) -> AIProviderError:
     return AIProviderError(
         kind,
         message,
         usage=usage,
         provider_request_id=provider_request_id,
+        provider_model=provider_model,
+        finish_reason=finish_reason,
+        latency_ms=latency_ms,
         ambiguous=ambiguous,
         cost_known=usage is not None,
     )
@@ -101,7 +111,7 @@ def parse_structured_chat_completion[ResultT: BaseModel](
 ) -> StructuredAIResult:
     payload = wire.payload
     provider_request_id = _request_id(payload, wire.provider_request_id)
-    usage = _usage(payload, provider_request_id)
+    usage = _usage(payload, provider_request_id, wire.latency_ms)
     provider_model = payload.get("model")
     if not isinstance(provider_model, str) or not provider_model.strip():
         raise _output_error(
@@ -109,15 +119,19 @@ def parse_structured_chat_completion[ResultT: BaseModel](
             "Provider response omitted its model identifier",
             usage,
             provider_request_id,
+            latency_ms=wire.latency_ms,
         )
 
     choices = payload.get("choices")
+    normalized_provider_model = provider_model.strip()
     if not isinstance(choices, list) or not choices:
         raise _output_error(
             AIErrorKind.MALFORMED_OUTPUT,
             "Provider returned an empty or invalid choices collection",
             usage,
             provider_request_id,
+            provider_model=normalized_provider_model,
+            latency_ms=wire.latency_ms,
         )
     if len(choices) != 1:
         raise _output_error(
@@ -126,6 +140,8 @@ def parse_structured_chat_completion[ResultT: BaseModel](
             usage,
             provider_request_id,
             ambiguous=True,
+            provider_model=normalized_provider_model,
+            latency_ms=wire.latency_ms,
         )
     choice = choices[0]
     if not isinstance(choice, dict) or choice.get("index") not in {0, None}:
@@ -134,6 +150,8 @@ def parse_structured_chat_completion[ResultT: BaseModel](
             "Provider returned an unexpected choice shape",
             usage,
             provider_request_id,
+            provider_model=normalized_provider_model,
+            latency_ms=wire.latency_ms,
         )
     finish_reason = choice.get("finish_reason")
     if not isinstance(finish_reason, str) or not finish_reason:
@@ -142,6 +160,8 @@ def parse_structured_chat_completion[ResultT: BaseModel](
             "Provider response omitted its finish reason",
             usage,
             provider_request_id,
+            provider_model=normalized_provider_model,
+            latency_ms=wire.latency_ms,
         )
     if finish_reason == "length":
         raise _output_error(
@@ -149,6 +169,9 @@ def parse_structured_chat_completion[ResultT: BaseModel](
             "Provider output was truncated",
             usage,
             provider_request_id,
+            provider_model=normalized_provider_model,
+            finish_reason=finish_reason,
+            latency_ms=wire.latency_ms,
         )
 
     message = choice.get("message")
@@ -158,6 +181,9 @@ def parse_structured_chat_completion[ResultT: BaseModel](
             "Provider returned an unexpected message shape",
             usage,
             provider_request_id,
+            provider_model=normalized_provider_model,
+            finish_reason=finish_reason,
+            latency_ms=wire.latency_ms,
         )
     refusal = message.get("refusal")
     refused = refusal is not None and refusal != "" and refusal is not False
@@ -167,6 +193,9 @@ def parse_structured_chat_completion[ResultT: BaseModel](
             "Provider refused the structured request",
             usage,
             provider_request_id,
+            provider_model=normalized_provider_model,
+            finish_reason=finish_reason,
+            latency_ms=wire.latency_ms,
         )
     if finish_reason != "stop":
         raise _output_error(
@@ -174,6 +203,9 @@ def parse_structured_chat_completion[ResultT: BaseModel](
             "Provider returned an unsupported finish reason",
             usage,
             provider_request_id,
+            provider_model=normalized_provider_model,
+            finish_reason=finish_reason,
+            latency_ms=wire.latency_ms,
         )
     content = message.get("content")
     if not isinstance(content, str) or not content.strip():
@@ -182,6 +214,9 @@ def parse_structured_chat_completion[ResultT: BaseModel](
             "Provider returned empty structured content",
             usage,
             provider_request_id,
+            provider_model=normalized_provider_model,
+            finish_reason=finish_reason,
+            latency_ms=wire.latency_ms,
         )
     try:
         decoded = json.loads(content)
@@ -191,6 +226,9 @@ def parse_structured_chat_completion[ResultT: BaseModel](
             "Provider structured content was not valid JSON",
             usage,
             provider_request_id,
+            provider_model=normalized_provider_model,
+            finish_reason=finish_reason,
+            latency_ms=wire.latency_ms,
         ) from error
     if not isinstance(decoded, dict):
         raise _output_error(
@@ -198,6 +236,9 @@ def parse_structured_chat_completion[ResultT: BaseModel](
             "Provider structured content was not a JSON object",
             usage,
             provider_request_id,
+            provider_model=normalized_provider_model,
+            finish_reason=finish_reason,
+            latency_ms=wire.latency_ms,
         )
     try:
         validated = result_type.model_validate(decoded)
@@ -207,6 +248,9 @@ def parse_structured_chat_completion[ResultT: BaseModel](
             "Provider structured content failed schema validation",
             usage,
             provider_request_id,
+            provider_model=normalized_provider_model,
+            finish_reason=finish_reason,
+            latency_ms=wire.latency_ms,
         ) from error
 
     return StructuredAIResult(
@@ -215,7 +259,7 @@ def parse_structured_chat_completion[ResultT: BaseModel](
         metadata=ProviderMetadata(
             provider=provider_alias,
             model=model_alias,
-            provider_model=provider_model.strip(),
+            provider_model=normalized_provider_model,
             provider_request_id=provider_request_id,
             finish_reason=finish_reason,
         ),

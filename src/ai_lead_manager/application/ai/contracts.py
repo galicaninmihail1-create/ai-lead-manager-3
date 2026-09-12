@@ -109,6 +109,9 @@ class AIProviderError(Exception):
         ambiguous: bool = False,
         usage: AIUsage | None = None,
         provider_request_id: str | None = None,
+        provider_model: str | None = None,
+        finish_reason: str | None = None,
+        latency_ms: int | None = None,
         cost_known: bool = True,
     ) -> None:
         super().__init__(message)
@@ -119,6 +122,9 @@ class AIProviderError(Exception):
         self.ambiguous = ambiguous
         self.usage = usage
         self.provider_request_id = provider_request_id
+        self.provider_model = provider_model
+        self.finish_reason = finish_reason
+        self.latency_ms = latency_ms
         self.cost_known = cost_known
 
 
@@ -156,6 +162,9 @@ class StructuredAIProvider(Protocol):
     provider_name: str
     model_name: str
     execution_mode: AIExecutionMode
+    prompt_version: str
+    schema_version: str
+    pricing_version: str | None
 
     def execute(self, request: StructuredAIRequest) -> StructuredAIResult: ...
 

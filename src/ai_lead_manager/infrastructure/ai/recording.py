@@ -2,6 +2,7 @@ from collections.abc import Callable
 
 from ai_lead_manager.application.ai.contracts import (
     AIExecutionMode,
+    AIOperationType,
     AIProviderError,
     StructuredAIRequest,
     StructuredAIResult,
@@ -20,6 +21,10 @@ class RecordingStructuredProvider:
         handler: Callable[[StructuredAIRequest], StructuredAIResult],
         scripted_outcomes: list[StructuredAIResult | AIProviderError] | None = None,
         execution_mode: AIExecutionMode = AIExecutionMode.MOCK,
+        operation_type: AIOperationType | None = None,
+        prompt_version: str = "test-v1",
+        schema_version: str = "1",
+        pricing_version: str | None = None,
     ) -> None:
         self.provider_name = provider_name
         self.model_name = model_name
@@ -27,6 +32,10 @@ class RecordingStructuredProvider:
         self.scripted_outcomes = list(scripted_outcomes or [])
         self.requests: list[StructuredAIRequest] = []
         self.execution_mode = execution_mode
+        self.operation_type = operation_type
+        self.prompt_version = prompt_version
+        self.schema_version = schema_version
+        self.pricing_version = pricing_version
 
     @property
     def physical_call_count(self) -> int:

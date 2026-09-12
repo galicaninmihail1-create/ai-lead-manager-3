@@ -59,10 +59,17 @@ class BoundedContextBuilder:
 
 
 def canonical_request_hash(payload: dict[str, Any]) -> str:
-    canonical = json.dumps(
+    return hashlib.sha256(canonical_request_bytes(payload)).hexdigest()
+
+
+def canonical_request_bytes(payload: dict[str, Any]) -> bytes:
+    return json.dumps(
         payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    return hashlib.sha256(canonical).hexdigest()
+
+
+def estimate_structured_tokens(payload: dict[str, Any]) -> int:
+    return estimate_tokens(canonical_request_bytes(payload).decode("utf-8"))

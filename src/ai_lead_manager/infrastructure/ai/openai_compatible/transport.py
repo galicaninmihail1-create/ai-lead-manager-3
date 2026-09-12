@@ -94,13 +94,16 @@ class OpenAICompatibleHTTPTransport:
                         cost_known=False,
                     )
                 response_body = self._bounded_body(response, provider_request_id)
-        except AIProviderError:
+        except AIProviderError as error:
+            if error.latency_ms is None:
+                error.latency_ms = self._latency_ms(started)
             raise
         except httpx.ConnectTimeout as error:
             raise AIProviderError(
                 AIErrorKind.TIMEOUT_CONNECT,
                 "Provider connection timed out",
                 safe_to_retry=True,
+                latency_ms=self._latency_ms(started),
             ) from error
         except httpx.ReadTimeout as error:
             raise AIProviderError(
@@ -108,6 +111,7 @@ class OpenAICompatibleHTTPTransport:
                 "Provider response timed out",
                 ambiguous=True,
                 cost_known=False,
+                latency_ms=self._latency_ms(started),
             ) from error
         except httpx.WriteTimeout as error:
             raise AIProviderError(
@@ -115,18 +119,21 @@ class OpenAICompatibleHTTPTransport:
                 "Provider request write timed out",
                 ambiguous=True,
                 cost_known=False,
+                latency_ms=self._latency_ms(started),
             ) from error
         except httpx.PoolTimeout as error:
             raise AIProviderError(
                 AIErrorKind.TRANSPORT,
                 "Provider connection pool timed out",
                 safe_to_retry=True,
+                latency_ms=self._latency_ms(started),
             ) from error
         except httpx.ConnectError as error:
             raise AIProviderError(
                 AIErrorKind.TRANSPORT,
                 "Provider connection failed",
                 safe_to_retry=True,
+                latency_ms=self._latency_ms(started),
             ) from error
         except httpx.WriteError as error:
             raise AIProviderError(
@@ -134,6 +141,7 @@ class OpenAICompatibleHTTPTransport:
                 "Provider request transmission failed",
                 ambiguous=True,
                 cost_known=False,
+                latency_ms=self._latency_ms(started),
             ) from error
         except (httpx.ReadError, httpx.RemoteProtocolError) as error:
             raise AIProviderError(
@@ -141,6 +149,7 @@ class OpenAICompatibleHTTPTransport:
                 "Provider response transport failed",
                 ambiguous=True,
                 cost_known=False,
+                latency_ms=self._latency_ms(started),
             ) from error
         except httpx.TimeoutException as error:
             raise AIProviderError(
@@ -148,6 +157,7 @@ class OpenAICompatibleHTTPTransport:
                 "Provider operation timed out",
                 ambiguous=True,
                 cost_known=False,
+                latency_ms=self._latency_ms(started),
             ) from error
         except httpx.TransportError as error:
             raise AIProviderError(
@@ -155,6 +165,7 @@ class OpenAICompatibleHTTPTransport:
                 "Provider transport failed",
                 ambiguous=True,
                 cost_known=False,
+                latency_ms=self._latency_ms(started),
             ) from error
 
         try:
@@ -166,6 +177,7 @@ class OpenAICompatibleHTTPTransport:
                 ambiguous=True,
                 provider_request_id=provider_request_id,
                 cost_known=False,
+                latency_ms=self._latency_ms(started),
             ) from error
         if not isinstance(decoded, dict):
             raise AIProviderError(
@@ -174,11 +186,12 @@ class OpenAICompatibleHTTPTransport:
                 ambiguous=True,
                 provider_request_id=provider_request_id,
                 cost_known=False,
+                latency_ms=self._latency_ms(started),
             )
         return OpenAIWireResponse(
             payload=decoded,
             provider_request_id=provider_request_id,
-            latency_ms=max(0, round((self._clock() - started) * 1_000)),
+            latency_ms=self._latency_ms(started),
         )
 
     def _bounded_body(
@@ -258,3 +271,6 @@ class OpenAICompatibleHTTPTransport:
         if not value or len(value) > 255 or re.fullmatch(r"[A-Za-z0-9._:-]+", value) is None:
             return None
         return value
+
+    def _latency_ms(self, started: float) -> int:
+        return max(0, round((self._clock() - started) * 1_000))

@@ -92,7 +92,12 @@ class QualificationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     tenant_id: uuid.UUID
-    idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
+    idempotency_key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        pattern=r"^[\x21-\x7e]+$",
+    )
 
 
 class ScoreFactorView(BaseModel):
@@ -144,7 +149,12 @@ class TenantActorRequest(BaseModel):
 
     tenant_id: uuid.UUID
     actor_type: ActorType = "manager"
-    idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
+    idempotency_key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        pattern=r"^[\x21-\x7e]+$",
+    )
 
 
 class LeadStatusRequest(TenantActorRequest):

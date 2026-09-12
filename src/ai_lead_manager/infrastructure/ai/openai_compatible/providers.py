@@ -87,6 +87,9 @@ class _OpenAICompatibleStructuredProvider:
                 "Provider returned a model outside the server allowlist",
                 usage=result.usage,
                 provider_request_id=result.metadata.provider_request_id,
+                provider_model=result.metadata.provider_model,
+                finish_reason=result.metadata.finish_reason,
+                latency_ms=result.latency_ms,
                 ambiguous=True,
                 cost_known=False,
             )
@@ -94,6 +97,8 @@ class _OpenAICompatibleStructuredProvider:
 
 
 class OpenAICompatibleQualificationProvider(_OpenAICompatibleStructuredProvider):
+    operation_type = AIOperationType.QUALIFICATION
+    operation_type = AIOperationType.QUALIFICATION
     prompt_builder = QualificationPromptBuilder()
     prompt_version = prompt_builder.version
 
@@ -129,6 +134,8 @@ class OpenAICompatibleQualificationProvider(_OpenAICompatibleStructuredProvider)
 
 
 class OpenAICompatibleDraftProvider(_OpenAICompatibleStructuredProvider):
+    operation_type = AIOperationType.DRAFT
+    operation_type = AIOperationType.DRAFT
     prompt_builder = DraftPromptBuilder()
     prompt_version = prompt_builder.version
 
@@ -167,6 +174,9 @@ class OpenAICompatibleDraftProvider(_OpenAICompatibleStructuredProvider):
                 "Provider draft is not Russian-language content",
                 usage=result.usage,
                 provider_request_id=result.metadata.provider_request_id,
+                provider_model=result.metadata.provider_model,
+                finish_reason=result.metadata.finish_reason,
+                latency_ms=result.latency_ms,
                 cost_known=result.usage is not None,
             )
         return result

@@ -28,7 +28,7 @@ from ai_lead_manager.application.ai.contracts import (
 )
 from ai_lead_manager.application.ai.ports import AIRepositoryFactory
 from ai_lead_manager.application.ai.pricing import ModelPricing, PricingCatalog
-from ai_lead_manager.application.ai.registry import ProviderRegistry
+from ai_lead_manager.application.ai.registry import ProviderRegistry, ProviderRoute
 from ai_lead_manager.application.ai.retry import RetryPolicy
 from ai_lead_manager.application.ai.spending import SpendingGuard
 from ai_lead_manager.application.tenant_context import TenantContext
@@ -58,6 +58,33 @@ class AIExecutor:
         self.circuit_breakers = circuit_breakers or CircuitBreakerRegistry()
         self.sleeper = sleeper
 
+    def resolve_route(
+        self, tenant: TenantContext, operation_type: AIOperationType
+    ) -> ProviderRoute:
+        with self.repository_factory.transaction(tenant.tenant_id) as repository:
+            policy = repository.get_policy_for_update()
+            self._validate_policy(tenant, policy)
+            assert policy is not None
+            route = self._provider_route(policy, operation_type)
+            price = self.pricing.get(route.provider, route.model)
+            self._validate_pricing_version(route, price)
+            return route
+
+    def requires_idempotency(
+        self, tenant_id: uuid.UUID, operation_type: AIOperationType
+    ) -> bool:
+        if (
+            self.settings.ai_execution_mode != AIExecutionMode.LIVE.value
+            or not self.settings.allow_live_ai
+        ):
+            return False
+        with self.repository_factory.transaction(tenant_id) as repository:
+            policy = repository.get_policy_for_update()
+            if policy is None or not policy.enabled:
+                return False
+            self._route(policy, operation_type)
+            return policy.mode == AIExecutionMode.LIVE.value
+
     def execute(
         self,
         tenant: TenantContext,
@@ -67,12 +94,15 @@ class AIExecutor:
         request_hash: str,
         request: StructuredAIRequest,
         response_type: type[ResultT],
+        *,
+        expected_route: ProviderRoute | None = None,
     ) -> AIExecutionOutcome[ResultT]:
         self._validate_identity(idempotency_key, request_hash)
         if request.operation_type != operation_type:
             raise ValueError("Request operation type does not match executor operation type")
 
         budget_error: BudgetExceededError | None = None
+        circuit_error: ProviderDisabledError | None = None
         with self.repository_factory.transaction(tenant.tenant_id) as repository:
             policy = repository.get_policy_for_update()
             existing = repository.get_operation_by_key_for_update(
@@ -83,16 +113,45 @@ class AIExecutor:
 
             self._validate_policy(tenant, policy)
             assert policy is not None
-            provider_name, model_name = self._route(policy, operation_type)
-            provider = self.providers.get(provider_name, model_name)
-            if provider.execution_mode.value != policy.mode:
+            route = self._provider_route(policy, operation_type)
+            if expected_route is not None and route != expected_route:
                 raise ProviderDisabledError(
                     AIErrorKind.PROVIDER_DISABLED,
-                    "Registered provider mode does not match tenant policy",
+                    "Tenant provider route changed while the AI request was being prepared",
+                )
+            provider_name, model_name = route.provider, route.model
+            provider = self.providers.get(provider_name, model_name, operation_type)
+            price = self.pricing.get(provider_name, model_name)
+            self._validate_pricing_version(route, price)
+            if route.enforce_request_contract and (
+                request.prompt_version != route.prompt_version
+                or request.schema_version != route.schema_version
+            ):
+                raise AIExecutionError(
+                    AIErrorKind.INVALID_REQUEST,
+                    "AI request contract does not match the resolved provider route",
                 )
             circuit = self.circuit_breakers.get(provider_name, model_name)
-            circuit.before_call()
-            price = self.pricing.get(provider_name, model_name)
+            try:
+                circuit.before_call()
+            except ProviderDisabledError as error:
+                circuit_error = error
+                repository.add_audit(
+                    AuditEvent(
+                        tenant_id=tenant.tenant_id,
+                        actor_type="system",
+                        action="ai.circuit_rejected",
+                        entity_type="tenant",
+                        entity_id=tenant.tenant_id,
+                        event_metadata={
+                            "operation_type": operation_type.value,
+                            "provider": provider_name,
+                            "model": model_name,
+                            "lead_id": str(lead_id) if lead_id is not None else None,
+                            "request_hash": request_hash,
+                        },
+                    )
+                )
             attempts = min(policy.max_attempts, self.settings.ai_max_attempts)
             max_output = min(
                 request.max_output_tokens,
@@ -105,9 +164,7 @@ class AIExecutor:
                 raise AIExecutionError(
                     AIErrorKind.INVALID_REQUEST, "AI input exceeds the configured token limit"
                 )
-            estimate = price.worst_case_cost(
-                request.estimated_input_tokens, max_output, attempts
-            )
+            estimate = price.worst_case_cost(request.estimated_input_tokens, max_output, attempts)
             bounded_request = request.model_copy(
                 update={
                     "max_output_tokens": max_output,
@@ -118,73 +175,84 @@ class AIExecutor:
                     ),
                 }
             )
-            try:
-                reservation = self.spending_guard.reserve(repository, policy, estimate)
-            except BudgetExceededError as error:
-                budget_error = error
-                repository.add_audit(
-                    AuditEvent(
-                        tenant_id=tenant.tenant_id,
-                        actor_type="system",
-                        action="ai.budget_rejected",
-                        entity_type="tenant",
-                        entity_id=tenant.tenant_id,
-                        event_metadata={
-                            "operation_type": operation_type.value,
-                            "estimated_max_cost_microusd": estimate,
-                        },
+            if circuit_error is None:
+                try:
+                    reservation = self.spending_guard.reserve(repository, policy, estimate)
+                except BudgetExceededError as error:
+                    budget_error = error
+                    repository.add_audit(
+                        AuditEvent(
+                            tenant_id=tenant.tenant_id,
+                            actor_type="system",
+                            action="ai.budget_rejected",
+                            entity_type="tenant",
+                            entity_id=tenant.tenant_id,
+                            event_metadata={
+                                "operation_type": operation_type.value,
+                                "provider": provider_name,
+                                "model": model_name,
+                                "estimated_max_cost_microusd": estimate,
+                                "lead_id": str(lead_id) if lead_id is not None else None,
+                                "request_hash": request_hash,
+                            },
+                        )
                     )
-                )
-            else:
-                operation = repository.add_operation(
-                    AIOperation(
-                        tenant_id=tenant.tenant_id,
-                        operation_type=operation_type.value,
-                        lead_id=lead_id,
-                        idempotency_key=idempotency_key,
-                        request_hash=request_hash,
-                        provider=provider_name,
-                        model=model_name,
-                        pricing_version=price.version,
-                        status=AIOperationStatus.CALLING.value,
-                        estimated_max_cost_microusd=estimate,
-                        reserved_cost_microusd=reservation.amount_microusd,
-                        actual_cost_microusd=0,
+                else:
+                    operation = repository.add_operation(
+                        AIOperation(
+                            tenant_id=tenant.tenant_id,
+                            operation_type=operation_type.value,
+                            lead_id=lead_id,
+                            idempotency_key=idempotency_key,
+                            request_hash=request_hash,
+                            provider=provider_name,
+                            model=model_name,
+                            pricing_version=price.version,
+                            status=AIOperationStatus.CALLING.value,
+                            estimated_max_cost_microusd=estimate,
+                            reserved_cost_microusd=reservation.amount_microusd,
+                            actual_cost_microusd=0,
+                        )
                     )
-                )
-                repository.add_audit(
-                    self._audit(
-                        tenant,
-                        "ai.operation_reserved",
-                        operation,
-                        {
-                            "estimated_max_cost_microusd": estimate,
-                            "period_spend_before_microusd": reservation.period_spend_before_microusd,
-                        },
+                    repository.add_audit(
+                        self._audit(
+                            tenant,
+                            "ai.operation_reserved",
+                            operation,
+                            {
+                                "estimated_max_cost_microusd": estimate,
+                                "period_spend_before_microusd": (
+                                    reservation.period_spend_before_microusd
+                                ),
+                            },
+                        )
                     )
-                )
-                repository.add_audit(
-                    self._audit(tenant, "ai.execution_started", operation, {})
-                )
-                operation_id = operation.id
+                    repository.add_audit(
+                        self._audit(tenant, "ai.execution_started", operation, {})
+                    )
+                    operation_id = operation.id
 
+        if circuit_error is not None:
+            raise circuit_error
         if budget_error is not None:
             raise budget_error
 
         retry_policy = RetryPolicy(max_attempts=attempts)
         for attempt in range(1, attempts + 1):
             try:
+                self._record_attempt_started(tenant, operation_id, attempt, operation)
                 result = provider.execute(bounded_request)
                 if result.usage is None:
-                    error = AIProviderError(
+                    raise AIProviderError(
                         AIErrorKind.UNKNOWN_COST,
                         "Provider did not return usage required for cost accounting",
                         ambiguous=True,
                         cost_known=False,
                         provider_request_id=result.metadata.provider_request_id,
+                        provider_model=result.metadata.provider_model,
+                        finish_reason=result.metadata.finish_reason,
+                        latency_ms=result.latency_ms,
                     )
-                    self._record_error(tenant, operation_id, attempt, operation, price, error, True)
-                    raise error
                 self._validate_provider_identity(
                     result.metadata.provider,
                     result.metadata.model,
@@ -195,14 +263,15 @@ class AIExecutor:
                 try:
                     structured = response_type.model_validate(result.output)
                 except ValidationError as validation_error:
-                    error = AIProviderError(
+                    raise AIProviderError(
                         AIErrorKind.SCHEMA_VALIDATION,
                         "Provider output did not match the required schema",
                         usage=result.usage,
                         provider_request_id=result.metadata.provider_request_id,
-                    )
-                    self._record_error(tenant, operation_id, attempt, operation, price, error, True)
-                    raise error from validation_error
+                        provider_model=result.metadata.provider_model,
+                        finish_reason=result.metadata.finish_reason,
+                        latency_ms=result.latency_ms,
+                    ) from validation_error
                 actual_cost = price.actual_cost(result.usage)
                 try:
                     self._record_success(
@@ -225,14 +294,16 @@ class AIExecutor:
                     model=model_name,
                 )
             except AIProviderError as error:
-                if error.kind in {AIErrorKind.SCHEMA_VALIDATION, AIErrorKind.UNKNOWN_COST}:
-                    raise
                 terminal = not retry_policy.should_retry(error, attempt)
                 self._record_error(tenant, operation_id, attempt, operation, price, error, terminal)
                 if terminal:
                     circuit.record_failure(error)
                     raise
-                self.sleeper(retry_policy.delay_seconds(error, attempt))
+                delay = retry_policy.delay_seconds(error, attempt)
+                self._record_retry_scheduled(
+                    tenant, operation_id, operation, attempt, delay, error.kind
+                )
+                self.sleeper(delay)
 
         raise AssertionError("Retry loop exhausted without a terminal outcome")
 
@@ -260,9 +331,15 @@ class AIExecutor:
 
     @staticmethod
     def _validate_identity(idempotency_key: str, request_hash: str) -> None:
-        if not idempotency_key.strip() or len(idempotency_key) > 200:
-            raise ValueError("A bounded non-empty idempotency key is required")
-        if len(request_hash) != 64 or any(character not in "0123456789abcdef" for character in request_hash):
+        if (
+            not idempotency_key
+            or len(idempotency_key) > 200
+            or any(ord(character) < 33 or ord(character) > 126 for character in idempotency_key)
+        ):
+            raise ValueError("A bounded visible-ASCII idempotency key is required")
+        if len(request_hash) != 64 or any(
+            character not in "0123456789abcdef" for character in request_hash
+        ):
             raise ValueError("request_hash must be a lowercase SHA-256 digest")
 
     def _validate_policy(
@@ -302,6 +379,26 @@ class AIExecutor:
         if operation_type == AIOperationType.QUALIFICATION:
             return policy.qualification_provider, policy.qualification_model
         return policy.draft_provider, policy.draft_model
+
+    def _provider_route(
+        self, policy: TenantAIPolicy, operation_type: AIOperationType
+    ) -> ProviderRoute:
+        provider_name, model_name = self._route(policy, operation_type)
+        route = self.providers.route(operation_type, provider_name, model_name)
+        if route.execution_mode.value != policy.mode:
+            raise ProviderDisabledError(
+                AIErrorKind.PROVIDER_DISABLED,
+                "Registered provider mode does not match tenant policy",
+            )
+        return route
+
+    @staticmethod
+    def _validate_pricing_version(route: ProviderRoute, price: ModelPricing) -> None:
+        if route.pricing_version is not None and route.pricing_version != price.version:
+            raise AIExecutionError(
+                AIErrorKind.UNKNOWN_COST,
+                "Provider route and server-controlled pricing versions do not match",
+            )
 
     @staticmethod
     def _existing_outcome(
@@ -363,6 +460,7 @@ class AIExecutor:
                     attempt=attempt,
                     provider=reserved_operation.provider,
                     model=reserved_operation.model,
+                    provider_model=result.metadata.provider_model,
                     provider_request_id=result.metadata.provider_request_id,
                     status=ProviderCallStatus.SUCCEEDED.value,
                     latency_ms=result.latency_ms,
@@ -383,10 +481,69 @@ class AIExecutor:
                     tenant,
                     "ai.provider_attempt_succeeded",
                     operation,
-                    {"attempt": attempt, "actual_cost_microusd": actual_cost},
+                    {
+                        "attempt": attempt,
+                        "actual_cost_microusd": actual_cost,
+                        "provider_request_id": result.metadata.provider_request_id,
+                    },
                 )
             )
 
+    def _record_attempt_started(
+        self,
+        tenant: TenantContext,
+        operation_id: uuid.UUID,
+        attempt: int,
+        reserved_operation: AIOperation,
+    ) -> None:
+        with self.repository_factory.transaction(tenant.tenant_id) as repository:
+            operation = repository.get_operation_for_update(operation_id)
+            if operation is None or operation.status != AIOperationStatus.CALLING.value:
+                raise AIOperationNotReplayableError(
+                    AIErrorKind.AMBIGUOUS_RESULT,
+                    "AI operation is not callable",
+                )
+            repository.add_audit(
+                self._audit(
+                    tenant,
+                    "ai.provider_attempt_started",
+                    operation,
+                    {
+                        "attempt": attempt,
+                        "provider": reserved_operation.provider,
+                        "model": reserved_operation.model,
+                    },
+                )
+            )
+
+    def _record_retry_scheduled(
+        self,
+        tenant: TenantContext,
+        operation_id: uuid.UUID,
+        reserved_operation: AIOperation,
+        attempt: int,
+        delay_seconds: float,
+        error_kind: AIErrorKind,
+    ) -> None:
+        with self.repository_factory.transaction(tenant.tenant_id) as repository:
+            operation = repository.get_operation_for_update(operation_id)
+            if operation is None:
+                raise RuntimeError("Reserved AI operation disappeared")
+            repository.add_audit(
+                self._audit(
+                    tenant,
+                    "ai.retry_scheduled",
+                    operation,
+                    {
+                        "attempt": attempt,
+                        "next_attempt": attempt + 1,
+                        "delay_seconds": delay_seconds,
+                        "error_kind": error_kind.value,
+                        "provider": reserved_operation.provider,
+                        "model": reserved_operation.model,
+                    },
+                )
+            )
     def _record_error(
         self,
         tenant: TenantContext,
@@ -415,15 +572,18 @@ class AIExecutor:
                     attempt=attempt,
                     provider=reserved_operation.provider,
                     model=reserved_operation.model,
+                    provider_model=error.provider_model,
                     provider_request_id=error.provider_request_id,
                     status=call_status,
                     http_status=error.http_status,
                     error_kind=error.kind.value,
+                    latency_ms=error.latency_ms,
                     input_tokens=error.usage.input_tokens if error.usage else None,
                     output_tokens=error.usage.output_tokens if error.usage else None,
                     cached_tokens=error.usage.cached_tokens if error.usage else None,
                     actual_cost_microusd=actual_cost if cost_known else None,
                     cost_known=cost_known,
+                    finish_reason=error.finish_reason,
                 )
             )
             if cost_known:

@@ -2,6 +2,8 @@ import uuid
 
 from ai_lead_manager.application.ai.context import BoundedContextBuilder, canonical_request_hash
 from ai_lead_manager.application.ai.contracts import (
+    AIErrorKind,
+    AIExecutionError,
     AIExecutionOutcome,
     AIOperationStatus,
     AIOperationType,
@@ -73,6 +75,20 @@ class QualificationService:
     def _qualify(
         self, lead_id: uuid.UUID, idempotency_key: str | None
     ) -> QualificationResponse:
+        route = None
+        if self.ai_executor is not None:
+            if idempotency_key is None:
+                if self.ai_executor.requires_idempotency(
+                    self.tenant_id, AIOperationType.QUALIFICATION
+                ):
+                    raise AIExecutionError(
+                        AIErrorKind.INVALID_REQUEST,
+                        "LIVE qualification requires an idempotency key",
+                    )
+            else:
+                route = self.ai_executor.resolve_route(
+                    self.tenant_context, AIOperationType.QUALIFICATION
+                )
         lead = self.repository.get_lead(lead_id)
         if lead is None:
             raise EntityNotFoundError("Lead was not found in the current tenant")
@@ -94,12 +110,13 @@ class QualificationService:
         )
         execution: AIExecutionOutcome[StructuredQualification] | None = None
         if idempotency_key is not None and self.ai_executor is not None:
+            assert route is not None
             payload = provider_context.model_dump(mode="json")
             request = StructuredAIRequest(
                 operation_type=AIOperationType.QUALIFICATION,
                 schema_name="StructuredQualification",
-                schema_version=self.provider.schema_version,
-                prompt_version=self.provider.prompt_version,
+                schema_version=route.schema_version,
+                prompt_version=route.prompt_version,
                 payload=payload,
                 estimated_input_tokens=bounded.estimated_tokens,
                 max_output_tokens=self.max_output_tokens,
@@ -107,6 +124,9 @@ class QualificationService:
             request_hash = canonical_request_hash(
                 {
                     "lead_id": str(lead.id),
+                    "operation_type": AIOperationType.QUALIFICATION.value,
+                    "provider": route.provider,
+                    "model": route.model,
                     "schema_name": request.schema_name,
                     "schema_version": request.schema_version,
                     "prompt_version": request.prompt_version,
@@ -122,6 +142,7 @@ class QualificationService:
                 request_hash,
                 request,
                 StructuredQualification,
+                expected_route=route,
             )
             if execution.replayed:
                 if execution.result_analysis_id is None:
@@ -135,12 +156,16 @@ class QualificationService:
             provider_result = execution.value
             provider_name = execution.provider
             model_name = execution.model
+            schema_version = request.schema_version
+            prompt_version = request.prompt_version
         else:
             provider_result = StructuredQualification.model_validate(
                 self.provider.analyze(provider_context)
             )
             provider_name = self.provider.provider_name
             model_name = self.provider.model_name
+            schema_version = self.provider.schema_version
+            prompt_version = self.provider.prompt_version
 
         analysis = self.repository.add_analysis(
             LeadAnalysis(
@@ -148,8 +173,8 @@ class QualificationService:
                 lead_id=lead.id,
                 provider=provider_name,
                 model=model_name,
-                schema_version=self.provider.schema_version,
-                prompt_version=self.provider.prompt_version,
+                schema_version=schema_version,
+                prompt_version=prompt_version,
                 intent=provider_result.intent,
                 task=provider_result.task,
                 pain_points=provider_result.pain_points,

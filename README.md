@@ -1,9 +1,9 @@
 # AI Lead Manager 3.0
 
-Технический фундамент multi-tenant AI Sales Operator. Stage 5B-1 добавляет изолированный
-OpenAI-compatible provider foundation, но он ещё не включён в production composition:
-реальных AI-вызовов, credentials в репозитории, мессенджеров, CRM, фоновых задач и
-аутентификации пока нет.
+Технический фундамент multi-tenant AI Sales Operator. Stage 5B-2 интегрирует
+OpenAI-compatible qualification/draft adapters в безопасный AI executor. Режим по умолчанию
+остаётся полностью локальным `MOCK`; реальных AI-вызовов, credentials в репозитории,
+мессенджеров, CRM, фоновых задач и аутентификации пока нет.
 
 ## Архитектура
 
@@ -14,9 +14,8 @@ OpenAI-compatible provider foundation, но он ещё не включён в p
 
 Модуль `application/ai` владеет provider-neutral контрактами, pricing, idempotency,
 spending guard, retry-решениями и circuit breaker. `infrastructure/ai` содержит
-SQLAlchemy-репозиторий и полностью локальный recording provider. Будущий HTTP adapter
-реального провайдера должен находиться в `infrastructure/ai`, не протекая vendor-типами
-в application/domain.
+SQLAlchemy-репозиторий, composition root, полностью локальный recording provider и
+OpenAI-compatible HTTP adapters. Vendor-типы не протекают в application/domain.
 
 Tenant-scoped репозитории требуют `tenant_id`, фильтруют по нему чтения и отвергают запись сущности
 другого tenant. Составные foreign keys обеспечивают tenant-consistency связей также на уровне БД.
@@ -34,7 +33,7 @@ Email нормализуется через trim + lowercase. Для телеф�
 ## Qualification Engine
 
 Development/internal endpoint `POST /api/v1/leads/{lead_id}/qualify` принимает `tenant_id` в
-валидируемом JSON body. Детерминированный локальный mock извлекает структурированные признаки из
+валидируемом JSON body и поддерживает стандартный заголовок `Idempotency-Key`. Детерминированный локальный mock извлекает структурированные признаки из
 истории входящих сообщений, после чего независимый ruleset `qualification-v1` рассчитывает score,
 температуру и объяснимые факторы. Каждая повторная квалификация сохраняется как новый исторический
 run; рекомендации записываются, но никогда не отправляются автоматически.
@@ -64,7 +63,7 @@ HTTP endpoints:
 Режим по умолчанию — `MOCK`. Даже если tenant policy переключена в `LIVE`, вызов
 fail-closed: одновременно требуются trusted `TenantContext`, глобальные
 `AI_EXECUTION_MODE=LIVE` и `ALLOW_LIVE_AI=true`, разрешённая пара provider/model и
-известная серверу версия цены. На этом этапе LIVE provider намеренно отсутствует.
+известная серверу версия цены и доступный server-owned credential.
 `AI_KILL_SWITCH=true` немедленно запрещает новые AI-операции.
 
 Для безопасного пути qualification/draft передаётся обязательный idempotency key.
@@ -106,8 +105,8 @@ Retry разрешён только для connect timeout до передачи
 
 Пакет `infrastructure/ai/openai_compatible` содержит server-controlled catalog,
 credential resolver, HTTP transport, versioned prompts и отдельные qualification/draft
-adapter'ы. Они реализуют Stage 5A `StructuredAIProvider`, но намеренно не зарегистрированы
-в production `ProviderRegistry` до Stage 5B-2.
+adapter'ы. Они реализуют Stage 5A `StructuredAIProvider` и регистрируются composition root
+только для явно разрешённых operation/provider/model комбинаций.
 
 Конфигурация передаётся сервером через `AI_OPENAI_COMPATIBLE_PROVIDERS_JSON`; значение по
 умолчанию — пустой allowlist `[]`. В конфигурации находятся только alias, HTTPS base URL,
@@ -125,6 +124,25 @@ Prompts имеют фиксированные версии, отделяют sys
 данными клиента и запрещают следовать инструкциям внутри сообщений. Qualification
 возвращает только структурированные факты без Lead Score. Draft обязан быть
 русскоязычным и остаётся только черновиком для обязательного human approval.
+
+## Executor integration (Stage 5B-2)
+
+Composition root объединяет MOCK и LIVE реализации в operation-aware `ProviderRegistry`,
+поэтому одна allowlisted пара provider/model может безопасно иметь разные qualification и
+draft adapters. Tenant policy выбирает только серверные aliases; API не принимает base URL,
+upstream model или цену. LIVE pricing задаётся отдельным server-controlled JSON catalog через
+`AI_MODEL_PRICING_JSON`, а версия цены обязана совпадать с версией allowlisted model config.
+
+Перед построением canonical request service разрешает route и использует его фиксированные
+schema/prompt versions. Hash включает operation, lead/analysis, provider/model и ограниченный
+semantic payload. HTTP всегда выполняется после commit прикладной транзакции. Каждая физическая
+попытка получает отдельный `ProviderCall`; сохраняются upstream model, usage, cached tokens,
+request ID, finish reason, latency, exact micro-USD cost и cost-known status.
+
+Аудит связывает reservation, attempt start/result, retry, circuit rejection, budget rejection,
+domain finalization и `UNKNOWN`. Malformed output не запускает repair-вызов; неоднозначный
+результат сохраняет worst-case reservation. Черновик по-прежнему получает
+`APPROVAL_REQUIRED` и не имеет автоматического send-path.
 
 ## Docker
 

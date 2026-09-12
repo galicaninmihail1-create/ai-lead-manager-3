@@ -2,7 +2,7 @@ import uuid
 from collections.abc import Callable
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from sqlalchemy.orm import Session
 
 from ai_lead_manager.application.ai.contracts import (
@@ -46,6 +46,22 @@ from ai_lead_manager.infrastructure.repositories import (
 
 router = APIRouter()
 
+IdempotencyHeader = Annotated[
+    str | None,
+    Header(
+        alias="Idempotency-Key",
+        min_length=1,
+        max_length=200,
+        pattern=r"^[\x21-\x7e]+$",
+    ),
+]
+
+
+def resolve_idempotency_key(body_key: str | None, header_key: str | None) -> str | None:
+    if body_key is not None and header_key is not None and body_key != header_key:
+        raise HTTPException(status_code=409, detail={"code": AIErrorKind.INVALID_REQUEST.value})
+    return header_key or body_key
+
 
 @router.get("/health", tags=["system"])
 def health() -> dict[str, str]:
@@ -78,6 +94,7 @@ def qualify_lead(
     lead_id: uuid.UUID,
     request: QualificationRequest,
     session: Annotated[Session, Depends(get_session)],
+    idempotency_key: IdempotencyHeader = None,
 ) -> QualificationResponse:
     service = QualificationService(
         TenantContext.untrusted(request.tenant_id),
@@ -87,7 +104,10 @@ def qualify_lead(
         get_ai_executor(),
     )
     try:
-        return service.qualify(lead_id, request.idempotency_key)
+        return service.qualify(
+            lead_id,
+            resolve_idempotency_key(request.idempotency_key, idempotency_key),
+        )
     except EntityNotFoundError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except QualificationUnavailableError as error:
@@ -146,11 +166,14 @@ def generate_draft(
     lead_id: uuid.UUID,
     request: TenantActorRequest,
     session: Annotated[Session, Depends(get_session)],
+    idempotency_key: IdempotencyHeader = None,
 ) -> ResponseDraftResponse:
     service = workflow_service(session, request.tenant_id)
     return workflow_result(
         lambda: service.generate_draft(
-            lead_id, request.actor_type, request.idempotency_key
+            lead_id,
+            request.actor_type,
+            resolve_idempotency_key(request.idempotency_key, idempotency_key),
         )
     )
 

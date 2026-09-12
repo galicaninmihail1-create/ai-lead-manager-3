@@ -2,14 +2,20 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 
-from ai_lead_manager.application.ai.context import canonical_request_hash, estimate_tokens
+from ai_lead_manager.application.ai.context import (
+    canonical_request_hash,
+    estimate_structured_tokens,
+)
 from ai_lead_manager.application.ai.contracts import (
+    AIErrorKind,
+    AIExecutionError,
     AIExecutionOutcome,
     AIOperationStatus,
     AIOperationType,
     StructuredAIRequest,
 )
 from ai_lead_manager.application.ai.executor import AIExecutor
+from ai_lead_manager.application.ai.registry import ProviderRoute
 from ai_lead_manager.application.drafts import DraftContext, DraftProvider, DraftResult
 from ai_lead_manager.application.ports import UnitOfWork, WorkflowRepository
 from ai_lead_manager.application.schemas import (
@@ -106,8 +112,22 @@ class SalesWorkflowService:
         actor_type: str,
         idempotency_key: str | None = None,
     ) -> ResponseDraftResponse:
-        if idempotency_key is not None and self.ai_executor is not None:
-            return self._generate_draft_with_executor(lead_id, actor_type, idempotency_key)
+        if self.ai_executor is not None:
+            if idempotency_key is None:
+                if self.ai_executor.requires_idempotency(
+                    self.tenant_id, AIOperationType.DRAFT
+                ):
+                    raise AIExecutionError(
+                        AIErrorKind.INVALID_REQUEST,
+                        "LIVE draft generation requires an idempotency key",
+                    )
+            else:
+                route = self.ai_executor.resolve_route(
+                    self.tenant_context, AIOperationType.DRAFT
+                )
+                return self._generate_draft_with_executor(
+                    lead_id, actor_type, idempotency_key, route
+                )
         return self._execute(lambda: self._generate_draft(lead_id, actor_type))
 
     def _draft_context(self, lead_id: uuid.UUID) -> tuple[Lead, object, object, DraftContext]:
@@ -147,7 +167,11 @@ class SalesWorkflowService:
         return self._draft_response(draft)
 
     def _generate_draft_with_executor(
-        self, lead_id: uuid.UUID, actor_type: str, idempotency_key: str
+        self,
+        lead_id: uuid.UUID,
+        actor_type: str,
+        idempotency_key: str,
+        route: ProviderRoute,
     ) -> ResponseDraftResponse:
         execution: AIExecutionOutcome[DraftResult] | None = None
         try:
@@ -156,16 +180,18 @@ class SalesWorkflowService:
             request = StructuredAIRequest(
                 operation_type=AIOperationType.DRAFT,
                 schema_name="DraftResult",
-                schema_version="1",
-                prompt_version=self.draft_provider.prompt_version,
+                schema_version=route.schema_version,
+                prompt_version=route.prompt_version,
                 payload=payload,
-                estimated_input_tokens=estimate_tokens(str(payload)),
+                estimated_input_tokens=estimate_structured_tokens(payload),
                 max_output_tokens=self.max_output_tokens,
             )
             request_hash = canonical_request_hash(
                 {
                     "lead_id": str(lead.id),
-                    "analysis_id": str(analysis.id),
+                    "operation_type": AIOperationType.DRAFT.value,
+                    "provider": route.provider,
+                    "model": route.model,
                     "schema_name": request.schema_name,
                     "schema_version": request.schema_version,
                     "prompt_version": request.prompt_version,
@@ -181,6 +207,7 @@ class SalesWorkflowService:
                 request_hash,
                 request,
                 DraftResult,
+                expected_route=route,
             )
             if execution.replayed:
                 if execution.result_draft_id is None:

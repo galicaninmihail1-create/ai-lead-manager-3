@@ -580,6 +580,7 @@ class ProviderCall(Base):
     attempt: Mapped[int] = mapped_column(Integer, nullable=False)
     provider: Mapped[str] = mapped_column(String(100), nullable=False)
     model: Mapped[str] = mapped_column(String(100), nullable=False)
+    provider_model: Mapped[str | None] = mapped_column(String(200))
     provider_request_id: Mapped[str | None] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     http_status: Mapped[int | None] = mapped_column(Integer)
