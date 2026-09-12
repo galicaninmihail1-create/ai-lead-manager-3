@@ -9,6 +9,13 @@ from ai_lead_manager.application.normalization import normalize_phone
 LeadStatus = Literal["NEW", "QUALIFIED", "CONTACTED", "MEETING", "WON", "LOST"]
 
 
+class LiveAIReadinessRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operation: Literal["qualification", "draft"]
+    lead_id: uuid.UUID
+
+
 class TenantCreate(BaseModel):
     name: str
     slug: str

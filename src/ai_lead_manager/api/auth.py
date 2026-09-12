@@ -16,7 +16,7 @@ from ai_lead_manager.application.api_keys import (
 )
 from ai_lead_manager.application.tenant_context import TenantContext
 from ai_lead_manager.config import get_settings
-from ai_lead_manager.domain.models import AuditEvent, TenantAIPolicy
+from ai_lead_manager.domain.models import AuditEvent, TenantAIPolicy, TenantAPIKey
 from ai_lead_manager.infrastructure.repositories import (
     SqlAlchemyTenantAPIKeyRepository,
     SqlAlchemyUnitOfWork,
@@ -45,17 +45,29 @@ def _is_live_tenant(session: Session, tenant_id: uuid.UUID) -> bool:
 
 def _verify(
     session: Session,
-    tenant_id: uuid.UUID,
+    tenant_id: uuid.UUID | None,
     credentials: HTTPAuthorizationCredentials,
 ) -> VerifiedAPIKey:
     pepper = get_settings().tenant_api_key_pepper
+    credential_service = TenantAPIKeyCredentialService(
+        pepper.get_secret_value() if pepper is not None else None
+    )
+    try:
+        parsed = credential_service.parse(credentials.credentials)
+    except (APIKeyAuthenticationError, APIKeyConfigurationError) as error:
+        raise authentication_error() from error
+    resolved_tenant_id = session.scalar(
+        select(TenantAPIKey.tenant_id).where(TenantAPIKey.key_prefix == parsed.prefix)
+    )
+    if resolved_tenant_id is None or (
+        tenant_id is not None and resolved_tenant_id != tenant_id
+    ):
+        raise authentication_error()
     service = TenantAPIKeyService(
-        tenant_id,
-        SqlAlchemyTenantAPIKeyRepository(session, tenant_id),
+        resolved_tenant_id,
+        SqlAlchemyTenantAPIKeyRepository(session, resolved_tenant_id),
         SqlAlchemyUnitOfWork(session),
-        TenantAPIKeyCredentialService(
-            pepper.get_secret_value() if pepper is not None else None
-        ),
+        credential_service,
     )
     try:
         return service.verify(credentials.credentials)
@@ -63,18 +75,20 @@ def _verify(
         raise authentication_error() from error
 
 
-def trusted_context_for_scope(
+def authenticate_required_scope(
     session: Session,
-    body_tenant_id: uuid.UUID,
     credentials: HTTPAuthorizationCredentials | None,
     required_scope: APIKeyScope,
 ) -> TenantContext:
     if credentials is None:
-        if _is_live_tenant(session, body_tenant_id):
-            raise authentication_error()
-        return TenantContext.untrusted(body_tenant_id)
+        raise authentication_error()
+    verified = _verify(session, None, credentials)
+    return _authorized_context(session, verified, required_scope)
 
-    verified = _verify(session, body_tenant_id, credentials)
+
+def _authorized_context(
+    session: Session, verified: VerifiedAPIKey, required_scope: APIKeyScope
+) -> TenantContext:
     if required_scope not in verified.scopes:
         session.add(
             AuditEvent(
@@ -98,13 +112,25 @@ def trusted_context_for_scope(
             action="tenant_api_key.authenticated",
             entity_type="tenant_api_key",
             entity_id=verified.key_id,
-            event_metadata={
-                "key_prefix": verified.key_prefix,
-                "scope": required_scope.value,
-            },
+            event_metadata={"key_prefix": verified.key_prefix, "scope": required_scope.value},
         )
     )
     session.commit()
     return TenantContext.trusted_context(
         verified.tenant_id, f"tenant_api_key:{verified.key_id}"
     )
+
+
+def trusted_context_for_scope(
+    session: Session,
+    body_tenant_id: uuid.UUID,
+    credentials: HTTPAuthorizationCredentials | None,
+    required_scope: APIKeyScope,
+) -> TenantContext:
+    if credentials is None:
+        if _is_live_tenant(session, body_tenant_id):
+            raise authentication_error()
+        return TenantContext.untrusted(body_tenant_id)
+
+    verified = _verify(session, body_tenant_id, credentials)
+    return _authorized_context(session, verified, required_scope)

@@ -156,6 +156,11 @@ pepper не сохраняются. Поддерживаются только sc
 `TenantContext` и проверяют operation scope до budget reservation или provider transport.
 Body `tenant_id` остаётся лишь lookup-кандидатом и не может создать trusted context без ключа.
 
+`POST /api/v1/ai/readiness` принимает только operation и lead ID, а tenant получает из
+проверенного Bearer key. Preflight ограничивает qualification/draft context, разрешает
+server-owned route/pricing, считает worst-case micro-USD и доступный бюджет, возвращает
+машиночитаемые blockers и не резервирует средства, не создаёт AI ledger и не вызывает provider.
+
 ## Docker
 
 ```bash

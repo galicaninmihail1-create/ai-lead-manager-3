@@ -1005,6 +1005,42 @@ def test_postgres_http_bearer_fake_live_smoke(monkeypatch) -> None:
                 "Authorization": f"Bearer {qualify_key.api_key}",
                 "Idempotency-Key": "http-live-qualification",
             }
+            readiness = client.post(
+                "/api/v1/ai/readiness",
+                headers={"Authorization": f"Bearer {qualify_key.api_key}"},
+                json={"operation": "qualification", "lead_id": str(lead_id)},
+            )
+            assert readiness.status_code == 200 and readiness.json()["ready"] is True
+            assert fake_http.call_count == 0
+            assert session.scalar(select(func.count()).select_from(AIOperation)) == 0
+            assert session.scalar(select(func.count()).select_from(ProviderCall)) == 0
+
+            policy = session.get(TenantAIPolicy, tenant_id)
+            original_limit = policy.per_call_limit_microusd
+            policy.per_call_limit_microusd = 0
+            session.commit()
+            budget_blocked = client.post(
+                "/api/v1/ai/readiness",
+                headers={"Authorization": f"Bearer {qualify_key.api_key}"},
+                json={"operation": "qualification", "lead_id": str(lead_id)},
+            )
+            assert budget_blocked.status_code == 200
+            assert "per_call_limit_exceeded" in {
+                blocker["code"] for blocker in budget_blocked.json()["blockers"]
+            }
+            policy.per_call_limit_microusd = original_limit
+            session.commit()
+
+            runtime.settings.ai_kill_switch = True
+            kill_blocked = client.post(
+                "/api/v1/ai/readiness",
+                headers={"Authorization": f"Bearer {qualify_key.api_key}"},
+                json={"operation": "qualification", "lead_id": str(lead_id)},
+            )
+            assert "kill_switch_active" in {
+                blocker["code"] for blocker in kill_blocked.json()["blockers"]
+            }
+            runtime.settings.ai_kill_switch = False
             first = client.post(
                 f"/api/v1/leads/{lead_id}/qualify",
                 headers=headers,

@@ -5,12 +5,21 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from sqlalchemy.orm import Session
 
-from ai_lead_manager.api.auth import BearerCredentials, trusted_context_for_scope
+from ai_lead_manager.api.auth import (
+    BearerCredentials,
+    authenticate_required_scope,
+    trusted_context_for_scope,
+)
 from ai_lead_manager.application.ai.contracts import (
     AIErrorKind,
     AIExecutionError,
+    AIOperationType,
     AIProviderError,
     BudgetExceededError,
+)
+from ai_lead_manager.application.ai.readiness import (
+    LiveAIReadinessResult,
+    LiveAIReadinessService,
 )
 from ai_lead_manager.application.api_keys import APIKeyScope
 from ai_lead_manager.application.drafts import MockDraftProvider
@@ -22,6 +31,7 @@ from ai_lead_manager.application.schemas import (
     InboundHttpResponse,
     LeadStatusRequest,
     LeadStatusResponse,
+    LiveAIReadinessRequest,
     QualificationRequest,
     QualificationResponse,
     ResponseDraftResponse,
@@ -68,6 +78,29 @@ def resolve_idempotency_key(body_key: str | None, header_key: str | None) -> str
 @router.get("/health", tags=["system"])
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.post("/api/v1/ai/readiness", response_model=LiveAIReadinessResult)
+def live_ai_readiness(
+    request: LiveAIReadinessRequest,
+    session: Annotated[Session, Depends(get_session)],
+    credentials: BearerCredentials = None,
+) -> LiveAIReadinessResult:
+    operation = (
+        AIOperationType.QUALIFICATION
+        if request.operation == "qualification"
+        else AIOperationType.DRAFT
+    )
+    required_scope = (
+        APIKeyScope.AI_QUALIFY
+        if operation == AIOperationType.QUALIFICATION
+        else APIKeyScope.AI_DRAFT
+    )
+    tenant = authenticate_required_scope(session, credentials, required_scope)
+    executor = get_ai_executor()
+    return LiveAIReadinessService(session, executor, executor.settings).check(
+        tenant, operation, request.lead_id, frozenset({required_scope})
+    )
 
 
 @router.post("/api/v1/inbound/http", response_model=InboundHttpResponse, status_code=201)
