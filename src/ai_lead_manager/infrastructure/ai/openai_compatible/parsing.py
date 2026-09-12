@@ -1,5 +1,6 @@
 import json
 import re
+from functools import partial
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -11,6 +12,8 @@ from ai_lead_manager.application.ai.contracts import (
     ProviderMetadata,
     StructuredAIResult,
 )
+from ai_lead_manager.application.ai.money import Currency
+from ai_lead_manager.application.ai.provider_cost import ExactProviderCost
 from ai_lead_manager.infrastructure.ai.openai_compatible.transport import OpenAIWireResponse
 
 
@@ -46,10 +49,10 @@ def _request_id(payload: dict[str, Any], header_request_id: str | None) -> str |
 
 def _usage(
     payload: dict[str, Any], provider_request_id: str | None, latency_ms: int
-) -> AIUsage | None:
+) -> tuple[AIUsage | None, ExactProviderCost | None]:
     raw_usage = payload.get("usage")
     if raw_usage is None:
-        return None
+        return None, None
     try:
         parsed = _WireUsage.model_validate(raw_usage)
     except ValidationError as error:
@@ -71,11 +74,27 @@ def _usage(
             latency_ms=latency_ms,
             cost_known=False,
         )
-    return AIUsage(
+    usage = AIUsage(
         input_tokens=parsed.prompt_tokens,
         output_tokens=parsed.completion_tokens,
         cached_tokens=cached,
     )
+    raw_cost = raw_usage.get("cost_rub")
+    if raw_cost is None:
+        return usage, None
+    try:
+        provider_cost = ExactProviderCost.parse(raw_cost, Currency.RUB)
+    except ValueError as error:
+        raise AIProviderError(
+            AIErrorKind.UNKNOWN_COST,
+            "Provider returned invalid billing metadata",
+            ambiguous=True,
+            usage=usage,
+            provider_request_id=provider_request_id,
+            latency_ms=latency_ms,
+            cost_known=False,
+        ) from error
+    return usage, provider_cost
 
 
 def _output_error(
@@ -88,6 +107,7 @@ def _output_error(
     provider_model: str | None = None,
     finish_reason: str | None = None,
     latency_ms: int | None = None,
+    exact_provider_reported_cost: ExactProviderCost | None = None,
 ) -> AIProviderError:
     return AIProviderError(
         kind,
@@ -99,6 +119,12 @@ def _output_error(
         latency_ms=latency_ms,
         ambiguous=ambiguous,
         cost_known=usage is not None,
+        provider_reported_cost=(
+            exact_provider_reported_cost.normalized_money
+            if exact_provider_reported_cost is not None
+            else None
+        ),
+        exact_provider_reported_cost=exact_provider_reported_cost,
     )
 
 
@@ -111,10 +137,13 @@ def parse_structured_chat_completion[ResultT: BaseModel](
 ) -> StructuredAIResult:
     payload = wire.payload
     provider_request_id = _request_id(payload, wire.provider_request_id)
-    usage = _usage(payload, provider_request_id, wire.latency_ms)
+    usage, exact_provider_cost = _usage(payload, provider_request_id, wire.latency_ms)
+    output_error = partial(
+        _output_error, exact_provider_reported_cost=exact_provider_cost
+    )
     provider_model = payload.get("model")
     if not isinstance(provider_model, str) or not provider_model.strip():
-        raise _output_error(
+        raise output_error(
             AIErrorKind.MALFORMED_OUTPUT,
             "Provider response omitted its model identifier",
             usage,
@@ -125,7 +154,7 @@ def parse_structured_chat_completion[ResultT: BaseModel](
     choices = payload.get("choices")
     normalized_provider_model = provider_model.strip()
     if not isinstance(choices, list) or not choices:
-        raise _output_error(
+        raise output_error(
             AIErrorKind.MALFORMED_OUTPUT,
             "Provider returned an empty or invalid choices collection",
             usage,
@@ -134,7 +163,7 @@ def parse_structured_chat_completion[ResultT: BaseModel](
             latency_ms=wire.latency_ms,
         )
     if len(choices) != 1:
-        raise _output_error(
+        raise output_error(
             AIErrorKind.AMBIGUOUS_RESULT,
             "Provider returned multiple structured outputs",
             usage,
@@ -145,7 +174,7 @@ def parse_structured_chat_completion[ResultT: BaseModel](
         )
     choice = choices[0]
     if not isinstance(choice, dict) or choice.get("index") not in {0, None}:
-        raise _output_error(
+        raise output_error(
             AIErrorKind.MALFORMED_OUTPUT,
             "Provider returned an unexpected choice shape",
             usage,
@@ -155,7 +184,7 @@ def parse_structured_chat_completion[ResultT: BaseModel](
         )
     finish_reason = choice.get("finish_reason")
     if not isinstance(finish_reason, str) or not finish_reason:
-        raise _output_error(
+        raise output_error(
             AIErrorKind.MALFORMED_OUTPUT,
             "Provider response omitted its finish reason",
             usage,
@@ -164,7 +193,7 @@ def parse_structured_chat_completion[ResultT: BaseModel](
             latency_ms=wire.latency_ms,
         )
     if finish_reason == "length":
-        raise _output_error(
+        raise output_error(
             AIErrorKind.MALFORMED_OUTPUT,
             "Provider output was truncated",
             usage,
@@ -176,7 +205,7 @@ def parse_structured_chat_completion[ResultT: BaseModel](
 
     message = choice.get("message")
     if not isinstance(message, dict) or message.get("role") != "assistant":
-        raise _output_error(
+        raise output_error(
             AIErrorKind.MALFORMED_OUTPUT,
             "Provider returned an unexpected message shape",
             usage,
@@ -188,7 +217,7 @@ def parse_structured_chat_completion[ResultT: BaseModel](
     refusal = message.get("refusal")
     refused = refusal is not None and refusal != "" and refusal is not False
     if finish_reason == "content_filter" or refused:
-        raise _output_error(
+        raise output_error(
             AIErrorKind.INVALID_REQUEST,
             "Provider refused the structured request",
             usage,
@@ -198,7 +227,7 @@ def parse_structured_chat_completion[ResultT: BaseModel](
             latency_ms=wire.latency_ms,
         )
     if finish_reason != "stop":
-        raise _output_error(
+        raise output_error(
             AIErrorKind.MALFORMED_OUTPUT,
             "Provider returned an unsupported finish reason",
             usage,
@@ -209,7 +238,7 @@ def parse_structured_chat_completion[ResultT: BaseModel](
         )
     content = message.get("content")
     if not isinstance(content, str) or not content.strip():
-        raise _output_error(
+        raise output_error(
             AIErrorKind.MALFORMED_OUTPUT,
             "Provider returned empty structured content",
             usage,
@@ -221,7 +250,7 @@ def parse_structured_chat_completion[ResultT: BaseModel](
     try:
         decoded = json.loads(content)
     except json.JSONDecodeError as error:
-        raise _output_error(
+        raise output_error(
             AIErrorKind.MALFORMED_OUTPUT,
             "Provider structured content was not valid JSON",
             usage,
@@ -231,7 +260,7 @@ def parse_structured_chat_completion[ResultT: BaseModel](
             latency_ms=wire.latency_ms,
         ) from error
     if not isinstance(decoded, dict):
-        raise _output_error(
+        raise output_error(
             AIErrorKind.MALFORMED_OUTPUT,
             "Provider structured content was not a JSON object",
             usage,
@@ -243,7 +272,7 @@ def parse_structured_chat_completion[ResultT: BaseModel](
     try:
         validated = result_type.model_validate(decoded)
     except ValidationError as error:
-        raise _output_error(
+        raise output_error(
             AIErrorKind.SCHEMA_VALIDATION,
             "Provider structured content failed schema validation",
             usage,
@@ -264,4 +293,8 @@ def parse_structured_chat_completion[ResultT: BaseModel](
             finish_reason=finish_reason,
         ),
         latency_ms=wire.latency_ms,
+        provider_reported_cost=(
+            exact_provider_cost.normalized_money if exact_provider_cost is not None else None
+        ),
+        exact_provider_reported_cost=exact_provider_cost,
     )

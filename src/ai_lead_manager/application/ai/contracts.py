@@ -8,6 +8,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ai_lead_manager.application.ai.money import Money
+from ai_lead_manager.application.ai.provider_cost import ExactProviderCost
 
 
 class AIExecutionMode(StrEnum):
@@ -104,6 +105,7 @@ class StructuredAIResult(BaseModel):
     metadata: ProviderMetadata
     latency_ms: int | None = Field(default=None, ge=0)
     provider_reported_cost: Money | None = None
+    exact_provider_reported_cost: ExactProviderCost | None = None
 
 
 class AIProviderError(Exception):
@@ -123,6 +125,7 @@ class AIProviderError(Exception):
         latency_ms: int | None = None,
         cost_known: bool = True,
         provider_reported_cost: Money | None = None,
+        exact_provider_reported_cost: ExactProviderCost | None = None,
     ) -> None:
         super().__init__(message)
         self.kind = kind
@@ -137,6 +140,7 @@ class AIProviderError(Exception):
         self.latency_ms = latency_ms
         self.cost_known = cost_known
         self.provider_reported_cost = provider_reported_cost
+        self.exact_provider_reported_cost = exact_provider_reported_cost
 
 
 class AIExecutionError(Exception):

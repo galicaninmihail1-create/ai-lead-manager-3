@@ -92,6 +92,8 @@ class _OpenAICompatibleStructuredProvider:
                 latency_ms=result.latency_ms,
                 ambiguous=True,
                 cost_known=False,
+                provider_reported_cost=result.provider_reported_cost,
+                exact_provider_reported_cost=result.exact_provider_reported_cost,
             )
         return result
 
@@ -178,5 +180,7 @@ class OpenAICompatibleDraftProvider(_OpenAICompatibleStructuredProvider):
                 finish_reason=result.metadata.finish_reason,
                 latency_ms=result.latency_ms,
                 cost_known=result.usage is not None,
+                provider_reported_cost=result.provider_reported_cost,
+                exact_provider_reported_cost=result.exact_provider_reported_cost,
             )
         return result

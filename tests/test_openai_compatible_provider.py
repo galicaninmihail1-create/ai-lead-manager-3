@@ -21,6 +21,7 @@ from ai_lead_manager.application.drafts import DraftContext, MockDraftProvider
 from ai_lead_manager.application.providers import (
     MockQualificationProvider,
     QualificationContext,
+    StructuredQualification,
 )
 from ai_lead_manager.infrastructure.ai.openai_compatible.config import (
     OpenAICompatibleModelConfig,
@@ -35,12 +36,16 @@ from ai_lead_manager.infrastructure.ai.openai_compatible.credentials import (
 from ai_lead_manager.infrastructure.ai.openai_compatible.factory import (
     OpenAICompatibleProviderFactory,
 )
+from ai_lead_manager.infrastructure.ai.openai_compatible.parsing import (
+    parse_structured_chat_completion,
+)
 from ai_lead_manager.infrastructure.ai.openai_compatible.prompts import (
     DraftPromptBuilder,
     QualificationPromptBuilder,
 )
 from ai_lead_manager.infrastructure.ai.openai_compatible.transport import (
     OpenAICompatibleHTTPTransport,
+    OpenAIWireResponse,
 )
 from ai_lead_manager.infrastructure.ai.runtime import get_provider_registry
 
@@ -534,6 +539,131 @@ def test_missing_usage_is_distinct_from_zero_usage() -> None:
     assert provider.execute(qualification_request()).usage == AIUsage(
         input_tokens=0, output_tokens=0, cached_tokens=0
     )
+
+
+@pytest.mark.parametrize("operation", ["qualification", "draft"])
+def test_provider_reported_rub_cost_survives_shared_adapter_path(operation: str) -> None:
+    output = qualification_output() if operation == "qualification" else {"content": "Черновик."}
+    payload = chat_payload(output)
+    payload["usage"]["cost_rub"] = 0.04131306
+    factory = factory_with_handler(lambda request: json_response(request, payload))
+    provider = (
+        factory.qualification("local-compatible", "sales-structured")
+        if operation == "qualification"
+        else factory.draft("local-compatible", "sales-structured")
+    )
+    request = qualification_request() if operation == "qualification" else draft_request()
+
+    result = provider.execute(request)
+
+    assert result.exact_provider_reported_cost is not None
+    assert result.exact_provider_reported_cost.amount == Decimal("0.04131306")
+    assert result.provider_reported_cost is not None
+    assert result.provider_reported_cost.amount_micros == 41_314
+    assert result.provider_reported_cost.currency.value == "RUB"
+
+
+@pytest.mark.parametrize("cost", [1, "0.04131306"])
+def test_integer_and_strict_string_provider_costs_are_accepted(cost: int | str) -> None:
+    payload = chat_payload()
+    payload["usage"]["cost_rub"] = cost
+    provider = factory_with_handler(
+        lambda request: json_response(request, payload)
+    ).qualification("local-compatible", "sales-structured")
+
+    result = provider.execute(qualification_request())
+
+    assert result.exact_provider_reported_cost is not None
+    expected = Decimal(1) if cost == 1 else Decimal("0.04131306")
+    assert result.exact_provider_reported_cost.amount == expected
+
+
+@pytest.mark.parametrize("cost_marker", ["missing", None])
+def test_missing_and_null_provider_cost_are_allowed(cost_marker: str | None) -> None:
+    payload = chat_payload()
+    if cost_marker is None:
+        payload["usage"]["cost_rub"] = None
+    provider = factory_with_handler(
+        lambda request: json_response(request, payload)
+    ).qualification("local-compatible", "sales-structured")
+
+    result = provider.execute(qualification_request())
+
+    assert result.usage == AIUsage(input_tokens=31, output_tokens=17, cached_tokens=7)
+    assert result.provider_reported_cost is None
+    assert result.exact_provider_reported_cost is None
+
+
+@pytest.mark.parametrize(
+    "invalid_cost",
+    [
+        -1,
+        "NaN",
+        "Infinity",
+        "not-a-number",
+        "0.1234567890123456789",
+        "100000000000000",
+        "9223372036855",
+        True,
+    ],
+)
+def test_invalid_present_provider_cost_fails_closed_without_retry(invalid_cost: object) -> None:
+    calls = 0
+    payload = chat_payload()
+    payload["usage"]["cost_rub"] = invalid_cost
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return json_response(request, payload)
+
+    provider = factory_with_handler(handler).qualification(
+        "local-compatible", "sales-structured"
+    )
+    with pytest.raises(AIProviderError) as captured:
+        provider.execute(qualification_request())
+
+    assert captured.value.kind == AIErrorKind.UNKNOWN_COST
+    assert captured.value.ambiguous is True
+    assert captured.value.cost_known is False
+    assert captured.value.usage == AIUsage(input_tokens=31, output_tokens=17, cached_tokens=7)
+    assert captured.value.safe_to_retry is False
+    assert calls == 1
+
+
+def test_float_injected_after_transport_boundary_is_rejected() -> None:
+    payload = chat_payload()
+    payload["usage"]["cost_rub"] = 0.04131306
+
+    with pytest.raises(AIProviderError) as captured:
+        parse_structured_chat_completion(
+            OpenAIWireResponse(payload=payload, provider_request_id=None, latency_ms=1),
+            provider_alias="local-compatible",
+            model_alias="sales-structured",
+            result_type=StructuredQualification,
+        )
+
+    assert captured.value.kind == AIErrorKind.UNKNOWN_COST
+    assert captured.value.cost_known is False
+
+
+@pytest.mark.parametrize("failure", ["schema", "model"])
+def test_valid_provider_cost_survives_later_validation_failure(failure: str) -> None:
+    payload = chat_payload({"intent": "purchase"} if failure == "schema" else None)
+    payload["usage"]["cost_rub"] = "0.04131306"
+    if failure == "model":
+        payload["model"] = "unexpected-more-expensive-model"
+    provider = factory_with_handler(
+        lambda request: json_response(request, payload)
+    ).qualification("local-compatible", "sales-structured")
+
+    with pytest.raises(AIProviderError) as captured:
+        provider.execute(qualification_request())
+
+    assert captured.value.exact_provider_reported_cost is not None
+    assert captured.value.exact_provider_reported_cost.amount == Decimal("0.04131306")
+    assert captured.value.provider_reported_cost is not None
+    assert captured.value.provider_reported_cost.amount_micros == 41_314
 
 
 def test_unallowlisted_provider_response_model_fails_as_unknown_cost() -> None:
