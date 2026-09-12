@@ -44,6 +44,38 @@ class Tenant(Base, TimestampMixin):
     slug: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
 
 
+class TenantAPIKey(Base, TimestampMixin):
+    __tablename__ = "tenant_api_keys"
+    __table_args__ = (
+        CheckConstraint("status IN ('ACTIVE', 'REVOKED')", name="ck_tenant_api_keys_status"),
+        CheckConstraint("length(key_prefix) = 12", name="ck_tenant_api_keys_prefix_length"),
+        CheckConstraint("length(key_hash) = 64", name="ck_tenant_api_keys_hash_length"),
+        CheckConstraint(
+            "(status = 'ACTIVE' AND revoked_at IS NULL) OR "
+            "(status = 'REVOKED' AND revoked_at IS NOT NULL)",
+            name="ck_tenant_api_keys_revocation_state",
+        ),
+        UniqueConstraint("key_prefix", name="uq_tenant_api_keys_prefix"),
+        UniqueConstraint("id", "tenant_id", name="uq_tenant_api_keys_id_tenant"),
+        Index("ix_tenant_api_keys_tenant_status", "tenant_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    label: Mapped[str] = mapped_column(String(200), nullable=False)
+    key_prefix: Mapped[str] = mapped_column(String(12), nullable=False)
+    key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    scopes: Mapped[list[str]] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(10), default="ACTIVE", nullable=False)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class Customer(Base, TimestampMixin):
     __tablename__ = "customers"
     __table_args__ = (

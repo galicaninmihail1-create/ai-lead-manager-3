@@ -144,6 +144,15 @@ domain finalization и `UNKNOWN`. Malformed output не запускает repai
 результат сохраняет worst-case reservation. Черновик по-прежнему получает
 `APPROVAL_REQUIRED` и не имеет автоматического send-path.
 
+## Tenant API keys (Stage 5C-1A)
+
+Tenant API keys имеют формат `alm_sk_<12 hex chars>_<43 base64url chars>`: открытый
+12-символьный prefix используется только для tenant-scoped lookup, а 32-байтный secret
+создаётся через `secrets` и возвращается только при создании. В БД сохраняются prefix и
+HMAC-SHA256 полного ключа с обязательным server-side `TENANT_API_KEY_PEPPER`; plaintext и
+pepper не сохраняются. Поддерживаются только scopes `ai:qualify` и `ai:draft`, отзыв и
+опциональное время истечения. HTTP-аутентификация будет добавлена отдельно в Stage 5C-1B.
+
 ## Docker
 
 ```bash

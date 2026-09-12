@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     ai_max_output_tokens: int = Field(default=1_000, ge=1, le=20_000)
     ai_openai_compatible_providers_json: str = "[]"
     ai_model_pricing_json: str = "[]"
+    tenant_api_key_pepper: SecretStr | None = None
 
 
 @lru_cache

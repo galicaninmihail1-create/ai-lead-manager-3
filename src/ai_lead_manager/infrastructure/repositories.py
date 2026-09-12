@@ -24,7 +24,58 @@ from ai_lead_manager.domain.models import (
     ScoreFactor,
     ScoreRun,
     Tenant,
+    TenantAPIKey,
 )
+
+
+class SqlAlchemyTenantAPIKeyRepository:
+    def __init__(self, session: Session, tenant_id: uuid.UUID) -> None:
+        self.session = session
+        self.tenant_id = tenant_id
+
+    def tenant_exists(self) -> bool:
+        return self.session.scalar(
+            select(Tenant.id).where(Tenant.id == self.tenant_id)
+        ) is not None
+
+    def add(self, api_key: TenantAPIKey) -> TenantAPIKey:
+        if api_key.tenant_id != self.tenant_id:
+            raise TenantScopeError("Entity tenant does not match repository tenant scope")
+        self.session.add(api_key)
+        self.session.flush()
+        return api_key
+
+    def get(self, key_id: uuid.UUID) -> TenantAPIKey | None:
+        return self.session.scalar(
+            select(TenantAPIKey).where(
+                TenantAPIKey.id == key_id,
+                TenantAPIKey.tenant_id == self.tenant_id,
+            )
+        )
+
+    def get_by_prefix(self, prefix: str) -> TenantAPIKey | None:
+        return self.session.scalar(
+            select(TenantAPIKey).where(
+                TenantAPIKey.key_prefix == prefix,
+                TenantAPIKey.tenant_id == self.tenant_id,
+            )
+        )
+
+    def list(self) -> list[TenantAPIKey]:
+        return list(
+            self.session.scalars(
+                select(TenantAPIKey)
+                .where(TenantAPIKey.tenant_id == self.tenant_id)
+                .order_by(TenantAPIKey.created_at, TenantAPIKey.id)
+            )
+        )
+
+    def add_audit(self, event: AuditEvent) -> AuditEvent:
+        if event.tenant_id != self.tenant_id:
+            raise TenantScopeError("Entity tenant does not match repository tenant scope")
+        self.session.add(event)
+        self.session.flush()
+        return event
 
 
 class SqlAlchemyUnitOfWork:
