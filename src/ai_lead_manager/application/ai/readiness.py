@@ -98,6 +98,16 @@ class LiveAIReadinessService:
             budget_currency = None
             block("currency_mismatch", "Tenant AI budget currency is unsupported")
 
+        limits_valid = (
+            policy.monthly_limit_micros >= 0
+            and policy.per_call_limit_micros >= 0
+            and policy.max_input_tokens > 0
+            and policy.max_output_tokens > 0
+            and policy.max_attempts > 0
+        )
+        if not limits_valid:
+            block("budget_invalid", "Tenant AI budget or execution limits are invalid")
+
         provider, model = (
             (policy.qualification_provider, policy.qualification_model)
             if operation == AIOperationType.QUALIFICATION
@@ -108,6 +118,8 @@ class LiveAIReadinessService:
             route = self.executor.providers.route(operation, provider, model)
             if route.execution_mode.value != "LIVE":
                 block("provider_not_allowed", "Provider route is not LIVE-enabled")
+            elif route.credential_configured is not True:
+                block("credential_missing", "Provider credential is missing or blank")
         except Exception:
             block("provider_not_allowed", "Provider/model/operation route is not allowlisted")
 
@@ -116,6 +128,16 @@ class LiveAIReadinessService:
             price = self.executor.pricing.get(provider, model)
             if route is not None and route.pricing_version != price.version:
                 block("pricing_unknown", "Pricing version does not match the provider route")
+                price = None
+            elif (
+                route is not None
+                and route.billing_currency is not None
+                and price.currency.value != route.billing_currency
+            ):
+                block(
+                    "currency_mismatch",
+                    "Model pricing currency does not match the provider billing currency",
+                )
                 price = None
             elif budget_currency is None or price.currency != budget_currency:
                 block(
@@ -186,13 +208,17 @@ class LiveAIReadinessService:
                 ).model_dump(mode="json")
                 estimated_tokens = estimate_structured_tokens(payload)
 
-        input_limit = min(policy.max_input_tokens, self.settings.ai_max_input_tokens)
-        output_limit = min(policy.max_output_tokens, self.settings.ai_max_output_tokens)
+        input_limit = max(
+            min(policy.max_input_tokens, self.settings.ai_max_input_tokens), 0
+        )
+        output_limit = max(
+            min(policy.max_output_tokens, self.settings.ai_max_output_tokens), 0
+        )
         if estimated_tokens is not None and estimated_tokens > input_limit:
             block("context_too_large", "Estimated input exceeds the configured token limit")
-        attempts = min(policy.max_attempts, self.settings.ai_max_attempts)
+        attempts = max(min(policy.max_attempts, self.settings.ai_max_attempts), 0)
         estimate = None
-        if price is not None and estimated_tokens is not None:
+        if price is not None and estimated_tokens is not None and limits_valid:
             estimate = price.worst_case_cost(estimated_tokens, output_limit, attempts)
         period_start = self.executor.spending_guard.period_start(datetime.now(UTC))
         operation_currencies = set(
@@ -207,7 +233,7 @@ class LiveAIReadinessService:
         )
         remaining = None
         per_call_limit = None
-        if budget_currency is not None:
+        if budget_currency is not None and limits_valid:
             mismatched = operation_currencies - {budget_currency.value}
             if mismatched:
                 block(
@@ -252,7 +278,11 @@ class LiveAIReadinessService:
             provider_alias=provider,
             model_alias=model,
             pricing_version=price.version if price is not None else None,
-            credential_configured=route is not None and route.execution_mode.value == "LIVE",
+            credential_configured=(
+                route is not None
+                and route.execution_mode.value == "LIVE"
+                and route.credential_configured is True
+            ),
             estimated_max_cost=estimate,
             remaining_monthly_budget=remaining,
             per_call_limit=per_call_limit,

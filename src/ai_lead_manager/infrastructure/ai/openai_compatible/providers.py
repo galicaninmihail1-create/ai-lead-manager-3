@@ -43,6 +43,12 @@ class _OpenAICompatibleStructuredProvider:
         self.upstream_model = resolved.model.upstream_model
         self.provider_model_allowlist = resolved.model.provider_model_allowlist
         self.pricing_version = resolved.model.pricing_version
+        self.billing_currency = (
+            resolved.model.billing_currency.value
+            if resolved.model.billing_currency is not None
+            else None
+        )
+        self.credential_configured = False
         self._transport = transport
 
     def _request_payload(

@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from typing import Any
 
 import httpx
 
@@ -14,9 +15,35 @@ from ai_lead_manager.infrastructure.ai.openai_compatible.providers import (
 )
 from ai_lead_manager.infrastructure.ai.openai_compatible.transport import (
     OpenAICompatibleHTTPTransport,
+    OpenAIWireResponse,
 )
 
 ClientFactory = Callable[[OpenAICompatibleProviderConfig], httpx.Client | None]
+
+
+class _DeferredOpenAICompatibleTransport:
+    """Resolves secrets and creates HTTP state only for an actual provider call."""
+
+    def __init__(
+        self,
+        config: OpenAICompatibleProviderConfig,
+        credentials: CredentialResolver,
+        client_factory: ClientFactory,
+    ) -> None:
+        self.config = config
+        self.credentials = credentials
+        self.client_factory = client_factory
+
+    def post_chat_completion(self, payload: dict[str, Any]) -> OpenAIWireResponse:
+        transport = OpenAICompatibleHTTPTransport(
+            self.config,
+            self.credentials.resolve(self.config.api_key_env_var),
+            client=self.client_factory(self.config),
+        )
+        try:
+            return transport.post_chat_completion(payload)
+        finally:
+            transport.close()
 
 
 class OpenAICompatibleProviderFactory:
@@ -39,26 +66,31 @@ class OpenAICompatibleProviderFactory:
         resolved = self.catalog.resolve(
             provider_alias, model_alias, ProviderCapability.QUALIFICATION
         )
-        return OpenAICompatibleQualificationProvider(
+        provider = OpenAICompatibleQualificationProvider(
             resolved,
             self._transport(resolved.provider),
         )
+        provider.credential_configured = self.credentials.is_configured(
+            resolved.provider.api_key_env_var
+        )
+        return provider
 
     def draft(
         self, provider_alias: str, model_alias: str
     ) -> OpenAICompatibleDraftProvider:
         resolved = self.catalog.resolve(provider_alias, model_alias, ProviderCapability.DRAFT)
-        return OpenAICompatibleDraftProvider(
+        provider = OpenAICompatibleDraftProvider(
             resolved,
             self._transport(resolved.provider),
         )
+        provider.credential_configured = self.credentials.is_configured(
+            resolved.provider.api_key_env_var
+        )
+        return provider
 
     def _transport(
         self, config: OpenAICompatibleProviderConfig
-    ) -> OpenAICompatibleHTTPTransport:
-        credential = self.credentials.resolve(config.api_key_env_var)
-        return OpenAICompatibleHTTPTransport(
-            config,
-            credential,
-            client=self.client_factory(config),
+    ) -> _DeferredOpenAICompatibleTransport:
+        return _DeferredOpenAICompatibleTransport(
+            config, self.credentials, self.client_factory
         )

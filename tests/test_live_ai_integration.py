@@ -333,12 +333,14 @@ def test_server_pricing_must_be_valid_and_versioned() -> None:
         build_pricing_catalog(live_settings(ai_model_pricing_json="not-json"))
 
 
-def test_composition_requires_credential_for_configured_live_provider() -> None:
-    with pytest.raises(ProviderDisabledError):
-        build_provider_registry(
-            live_settings(),
-            credential_resolver=EnvironmentCredentialResolver({}),
-        )
+def test_composition_defers_missing_credential_until_an_actual_call() -> None:
+    registry = build_provider_registry(
+        live_settings(),
+        credential_resolver=EnvironmentCredentialResolver({}),
+    )
+
+    route = registry.route(AIOperationType.QUALIFICATION, PROVIDER_ALIAS, MODEL_ALIAS)
+    assert route.credential_configured is False
 
 
 def test_route_rejects_pricing_version_mismatch_before_http(session: Session) -> None:

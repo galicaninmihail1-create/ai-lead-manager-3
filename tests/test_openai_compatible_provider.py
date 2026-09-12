@@ -293,8 +293,11 @@ def test_missing_credential_fails_closed_without_environment_mutation() -> None:
         OpenAICompatibleProviderCatalog((provider_config(),)), resolver
     )
 
+    provider = factory.qualification("local-compatible", "sales-structured")
+    assert provider.credential_configured is False
+
     with pytest.raises(ProviderDisabledError) as captured:
-        factory.qualification("local-compatible", "sales-structured")
+        provider.execute(qualification_request())
 
     assert captured.value.kind == AIErrorKind.PROVIDER_DISABLED
     assert "TEST_OPENAI_COMPATIBLE_KEY" not in str(captured.value)

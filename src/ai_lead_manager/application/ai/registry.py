@@ -18,6 +18,8 @@ class ProviderRoute:
     prompt_version: str
     schema_version: str
     pricing_version: str | None
+    billing_currency: str | None
+    credential_configured: bool | None
     enforce_request_contract: bool
 
 
@@ -68,6 +70,8 @@ class ProviderRegistry:
             prompt_version=prompt_version,
             schema_version=schema_version,
             pricing_version=getattr(implementation, "pricing_version", None),
+            billing_currency=getattr(implementation, "billing_currency", None),
+            credential_configured=getattr(implementation, "credential_configured", None),
             enforce_request_contract=getattr(implementation, "operation_type", None)
             is not None,
         )

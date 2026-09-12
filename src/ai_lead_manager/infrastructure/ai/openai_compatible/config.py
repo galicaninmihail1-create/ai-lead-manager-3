@@ -13,6 +13,7 @@ from pydantic import (
 )
 
 from ai_lead_manager.application.ai.contracts import AIErrorKind, ProviderDisabledError
+from ai_lead_manager.application.ai.money import Currency
 
 
 class ProviderCapability(StrEnum):
@@ -37,6 +38,7 @@ class OpenAICompatibleModelConfig(BaseModel):
     upstream_model: str = Field(min_length=1, max_length=200)
     accepted_provider_models: frozenset[str] = Field(default_factory=frozenset)
     pricing_version: str = Field(min_length=1, max_length=50)
+    billing_currency: Currency | None = None
     capabilities: frozenset[ProviderCapability] = Field(min_length=1)
 
     @field_validator("accepted_provider_models")

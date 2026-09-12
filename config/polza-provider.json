@@ -12,6 +12,7 @@
           "openai/gpt-4.1-mini"
         ],
         "pricing_version": "polza-gpt41mini-rub-20260912-r1",
+        "billing_currency": "RUB",
         "capabilities": [
           "qualification",
           "draft",
