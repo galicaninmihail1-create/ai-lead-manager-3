@@ -53,6 +53,19 @@ class SqlAlchemyAIExecutionRepository:
             .with_for_update()
         )
 
+    def get_provider_calls_for_update(self, operation_id: uuid.UUID) -> list[ProviderCall]:
+        return list(
+            self.session.scalars(
+                select(ProviderCall)
+                .where(
+                    ProviderCall.operation_id == operation_id,
+                    ProviderCall.tenant_id == self.tenant_id,
+                )
+                .order_by(ProviderCall.attempt, ProviderCall.id)
+                .with_for_update()
+            )
+        )
+
     def add_operation(self, operation: AIOperation) -> AIOperation:
         return self._add(operation)
 
