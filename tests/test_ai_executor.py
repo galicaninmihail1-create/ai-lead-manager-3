@@ -190,7 +190,11 @@ def finalize(factory: sessionmaker[Session], tenant_id: uuid.UUID, operation_id:
 
 
 def test_mock_is_default_and_untrusted_context_can_execute(session_factory) -> None:
-    assert Settings(_env_file=None).ai_execution_mode == "MOCK"
+    settings = Settings(_env_file=None)
+    assert settings.ai_execution_mode == "MOCK"
+    assert settings.ai_connect_timeout_seconds == 10
+    assert settings.ai_read_timeout_seconds == 15
+    assert settings.ai_total_timeout_seconds == 20
     tenant_id = add_policy(session_factory)
     provider = RecordingStructuredProvider("fake", "model-v1", lambda _request: success())
 
@@ -199,6 +203,9 @@ def test_mock_is_default_and_untrusted_context_can_execute(session_factory) -> N
     assert outcome.value == ExampleResult(answer="ok")
     assert provider.physical_call_count == 1
     assert provider.requests[0].timeouts is not None
+    assert provider.requests[0].timeouts.connect_seconds == 10
+    assert provider.requests[0].timeouts.read_seconds == 15
+    assert provider.requests[0].timeouts.total_seconds == 20
     assert provider.requests[0].max_output_tokens == 5
 
 

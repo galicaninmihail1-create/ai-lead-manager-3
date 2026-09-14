@@ -80,6 +80,16 @@ def test_polza_configuration_keeps_identities_separate() -> None:
     )
 
 
+def test_polza_uses_longer_connect_timeout_without_changing_other_timeouts() -> None:
+    provider = polza_provider_config()
+
+    assert provider.timeouts.connect_seconds == 10
+    assert provider.timeouts.read_seconds == 15
+    assert provider.timeouts.write_seconds == 10
+    assert provider.timeouts.pool_seconds == 3
+    assert provider.safe_retry_http_statuses == frozenset()
+
+
 def test_polza_registers_existing_adapters_without_http() -> None:
     requests: list[httpx.Request] = []
 

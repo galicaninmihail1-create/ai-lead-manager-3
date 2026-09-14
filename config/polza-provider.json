@@ -4,6 +4,12 @@
     "base_url": "https://polza.ai/api",
     "api_key_env_var": "POLZA_AI_API_KEY",
     "chat_completions_path": "/v1/chat/completions",
+    "timeouts": {
+      "connect_seconds": 10,
+      "read_seconds": 15,
+      "write_seconds": 10,
+      "pool_seconds": 3
+    },
     "models": [
       {
         "alias": "lead-structured-v1",

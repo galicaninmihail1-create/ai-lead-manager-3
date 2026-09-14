@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     ai_default_qualification_model: str = "deterministic-keyword-v1"
     ai_default_draft_provider: str = "mock"
     ai_default_draft_model: str = "deterministic-template-v1"
-    ai_connect_timeout_seconds: float = Field(default=3.0, gt=0, le=30)
+    ai_connect_timeout_seconds: float = Field(default=10.0, gt=0, le=30)
     ai_read_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
     ai_total_timeout_seconds: float = Field(default=20.0, gt=0, le=180)
     ai_max_attempts: int = Field(default=2, ge=1, le=5)
