@@ -3,6 +3,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from ai_lead_manager.application.ai.context import estimate_structured_tokens
 from ai_lead_manager.application.ai.contracts import (
     AIErrorKind,
     AIExecutionMode,
@@ -110,7 +111,7 @@ class OpenAICompatibleQualificationProvider(_OpenAICompatibleStructuredProvider)
     prompt_builder = QualificationPromptBuilder()
     prompt_version = prompt_builder.version
 
-    def execute(self, request: StructuredAIRequest) -> StructuredAIResult:
+    def _qualification_payload(self, request: StructuredAIRequest) -> dict[str, Any]:
         if request.operation_type != AIOperationType.QUALIFICATION:
             raise AIProviderError(
                 AIErrorKind.INVALID_REQUEST,
@@ -130,6 +131,16 @@ class OpenAICompatibleQualificationProvider(_OpenAICompatibleStructuredProvider)
             schema_name="structured_qualification_v1",
             schema=StructuredQualification.model_json_schema(),
         )
+        return payload
+
+    def estimate_input_tokens(self, request: StructuredAIRequest) -> int:
+        return max(
+            request.estimated_input_tokens,
+            estimate_structured_tokens(self._qualification_payload(request)),
+        )
+
+    def execute(self, request: StructuredAIRequest) -> StructuredAIResult:
+        payload = self._qualification_payload(request)
         wire = self._transport.post_chat_completion(payload)
         return self._validate_provider_model(
             parse_structured_chat_completion(

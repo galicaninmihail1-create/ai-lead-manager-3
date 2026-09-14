@@ -73,6 +73,19 @@ class AIExecutor:
             self._validate_pricing_currency(policy, price)
             return route
 
+    def estimate_input_tokens(
+        self,
+        operation_type: AIOperationType,
+        provider_name: str,
+        model_name: str,
+        request: StructuredAIRequest,
+    ) -> int:
+        provider = self.providers.get(provider_name, model_name, operation_type)
+        estimator = getattr(provider, "estimate_input_tokens", None)
+        if estimator is None:
+            return request.estimated_input_tokens
+        return max(request.estimated_input_tokens, int(estimator(request)))
+
     def requires_idempotency(
         self, tenant_id: uuid.UUID, operation_type: AIOperationType
     ) -> bool:

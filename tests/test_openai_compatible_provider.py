@@ -375,6 +375,37 @@ def test_qualification_request_and_result_are_strict_and_provider_neutral() -> N
     assert result.usage == AIUsage(input_tokens=31, output_tokens=17, cached_tokens=7)
 
 
+def test_qualification_input_estimate_covers_complete_observed_qwen_request() -> None:
+    requests: list[httpx.Request] = []
+
+    def unexpected_request(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return json_response(request, chat_payload())
+
+    provider = factory_with_handler(unexpected_request).qualification(
+        "local-compatible", "sales-structured"
+    )
+    request = qualification_request(
+        context=QualificationContext(
+            customer_name="Алексей Смирнов",
+            has_email=False,
+            has_phone=False,
+            messages=[
+                "Здравствуйте! Хотим автоматизировать обработку заявок с сайта и Telegram, "
+                "автоматически определять приоритет клиентов и передавать горячие заявки "
+                "менеджеру в CRM. Бюджет около 150 000 ₽. Планируем внедрение в ближайший "
+                "месяц и готовы созвониться на этой неделе."
+            ],
+        )
+    )
+
+    estimate = provider.estimate_input_tokens(request)
+
+    assert estimate == 643
+    assert estimate >= 217
+    assert requests == []
+
+
 def test_qualification_structured_response_accepts_explicit_nulls() -> None:
     output = qualification_output()
     for field in ("task", "budget_amount", "budget_currency", "deadline"):

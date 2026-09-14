@@ -9,11 +9,12 @@ from ai_lead_manager.application.ai.context import (
     BoundedContextBuilder,
     estimate_structured_tokens,
 )
-from ai_lead_manager.application.ai.contracts import AIOperationType
+from ai_lead_manager.application.ai.contracts import AIOperationType, StructuredAIRequest
 from ai_lead_manager.application.ai.executor import AIExecutor
 from ai_lead_manager.application.ai.money import Currency, Money
 from ai_lead_manager.application.api_keys import APIKeyScope
 from ai_lead_manager.application.drafts import DraftContext
+from ai_lead_manager.application.providers import QualificationContext
 from ai_lead_manager.application.tenant_context import TenantContext
 from ai_lead_manager.config import Settings
 from ai_lead_manager.domain.models import (
@@ -148,6 +149,12 @@ class LiveAIReadinessService:
         except Exception:
             block("pricing_unknown", "Server-controlled model pricing is unavailable")
 
+        input_limit = max(
+            min(policy.max_input_tokens, self.settings.ai_max_input_tokens), 0
+        )
+        output_limit = max(
+            min(policy.max_output_tokens, self.settings.ai_max_output_tokens), 0
+        )
         lead = self.session.scalar(
             select(Lead).where(Lead.id == lead_id, Lead.tenant_id == tenant.tenant_id)
         )
@@ -155,6 +162,12 @@ class LiveAIReadinessService:
         if lead is None:
             block("entity_not_found", "Target lead was not found in the authenticated tenant")
         elif operation == AIOperationType.QUALIFICATION:
+            customer = self.session.scalar(
+                select(Customer).where(
+                    Customer.id == lead.customer_id,
+                    Customer.tenant_id == tenant.tenant_id,
+                )
+            )
             messages = list(
                 self.session.scalars(
                     select(Message.body)
@@ -175,6 +188,30 @@ class LiveAIReadinessService:
                 estimated_tokens = bounded.estimated_tokens
                 if not bounded.messages:
                     block("context_too_large", "No usable bounded qualification context")
+                elif customer is None:
+                    block("entity_not_found", "Lead customer was not found")
+                elif route is not None and output_limit > 0:
+                    context = QualificationContext(
+                        customer_name=customer.name,
+                        has_email=bool(customer.email),
+                        has_phone=bool(customer.phone),
+                        messages=list(bounded.messages),
+                    )
+                    request = StructuredAIRequest(
+                        operation_type=AIOperationType.QUALIFICATION,
+                        schema_name="StructuredQualification",
+                        schema_version=route.schema_version,
+                        prompt_version=route.prompt_version,
+                        payload=context.model_dump(mode="json"),
+                        estimated_input_tokens=estimated_tokens,
+                        max_output_tokens=output_limit,
+                    )
+                    estimated_tokens = self.executor.estimate_input_tokens(
+                        operation,
+                        provider,
+                        model,
+                        request,
+                    )
             except Exception:
                 block("context_too_large", "Qualification context cannot be bounded")
         else:
@@ -208,12 +245,6 @@ class LiveAIReadinessService:
                 ).model_dump(mode="json")
                 estimated_tokens = estimate_structured_tokens(payload)
 
-        input_limit = max(
-            min(policy.max_input_tokens, self.settings.ai_max_input_tokens), 0
-        )
-        output_limit = max(
-            min(policy.max_output_tokens, self.settings.ai_max_output_tokens), 0
-        )
         if estimated_tokens is not None and estimated_tokens > input_limit:
             block("context_too_large", "Estimated input exceeds the configured token limit")
         attempts = max(min(policy.max_attempts, self.settings.ai_max_attempts), 0)

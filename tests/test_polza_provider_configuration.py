@@ -36,10 +36,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 POLZA_CONFIGURATION_PATH = PROJECT_ROOT / "config" / "polza-provider.json"
 POLZA_PRICING_PATH = PROJECT_ROOT / "config" / "polza-pricing-20260912-r1.json"
 POLZA_COMBINED_PRICING_PATH = PROJECT_ROOT / "config" / "polza-pricing-20260914-r1.json"
+POLZA_CONSERVATIVE_PRICING_PATH = (
+    PROJECT_ROOT / "config" / "polza-pricing-20260914-r2.json"
+)
 POLZA_PRICING_VERSION = "polza-gpt41mini-rub-20260912-r1"
 QWEN_MODEL_ALIAS = "lead-structured-qwen-v1"
 QWEN_UPSTREAM_MODEL = "qwen/qwen3-30b-a3b-instruct-2507"
-QWEN_PRICING_VERSION = "polza-qwen3-30ba3b-rub-20260914-r1"
+QWEN_HISTORICAL_PRICING_VERSION = "polza-qwen3-30ba3b-rub-20260914-r1"
+QWEN_PRICING_VERSION = "polza-qwen3-30ba3b-rub-20260914-r2"
 OFFLINE_TEST_SECRET = "offline-polza-registration-test-secret"
 
 
@@ -161,10 +165,25 @@ def test_polza_immutable_pricing_snapshot_matches_route_and_exact_rub_rates() ->
     )
 
 
-def test_qwen_pricing_snapshot_is_conservative_exact_and_below_per_call_limit() -> None:
+def test_qwen_historical_pricing_snapshot_remains_immutable() -> None:
     settings = Settings(
         _env_file=None,
         ai_model_pricing_json=POLZA_COMBINED_PRICING_PATH.read_text(encoding="utf-8"),
+    )
+    qwen = build_pricing_catalog(settings).get("polza", QWEN_MODEL_ALIAS)
+
+    assert qwen.version == QWEN_HISTORICAL_PRICING_VERSION
+    assert qwen.input_price_micros_per_million_tokens == 5_677_945
+    assert qwen.output_price_micros_per_million_tokens == 22_764_843
+    assert qwen.cached_price_micros_per_million_tokens == 5_677_945
+
+
+def test_qwen_pricing_snapshot_covers_observed_polza_cost_and_budget() -> None:
+    settings = Settings(
+        _env_file=None,
+        ai_model_pricing_json=POLZA_CONSERVATIVE_PRICING_PATH.read_text(
+            encoding="utf-8"
+        ),
     )
     catalog = build_pricing_catalog(settings)
     qwen = catalog.get("polza", QWEN_MODEL_ALIAS)
@@ -175,13 +194,16 @@ def test_qwen_pricing_snapshot_is_conservative_exact_and_below_per_call_limit() 
 
     assert qwen.version == route.pricing_version == QWEN_PRICING_VERSION
     assert qwen.currency is Currency.RUB
-    assert qwen.input_price_micros_per_million_tokens == 5_677_945
-    assert qwen.output_price_micros_per_million_tokens == 22_764_843
-    assert qwen.cached_price_micros_per_million_tokens == 5_677_945
-    assert qwen.worst_case_cost(114, 100, 1) == Money(
-        amount_micros=2_925, currency=Currency.RUB
+    assert qwen.input_price_micros_per_million_tokens == 9_482_167
+    assert qwen.output_price_micros_per_million_tokens == 38_017_287
+    assert qwen.cached_price_micros_per_million_tokens == 9_482_167
+    assert qwen.actual_cost(
+        AIUsage(input_tokens=217, output_tokens=100, cached_tokens=0)
+    ) == Money(amount_micros=5_860, currency=Currency.RUB)
+    assert qwen.worst_case_cost(647, 400, 1) == Money(
+        amount_micros=21_342, currency=Currency.RUB
     )
-    assert qwen.worst_case_cost(1_000, 100, 1).amount_micros < 1_000_000
+    assert qwen.worst_case_cost(1_000, 400, 1).amount_micros < 1_000_000
     assert old.version == POLZA_PRICING_VERSION
     assert old.input_price_micros_per_million_tokens == 48_540_000
     assert old.output_price_micros_per_million_tokens == 194_160_000

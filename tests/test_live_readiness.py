@@ -7,10 +7,19 @@ from sqlalchemy.orm import Session, sessionmaker
 from test_live_ai_integration import FakeOpenAIHTTP, live_settings, runtime_for, seed_live_lead
 
 from ai_lead_manager.application.ai.contracts import AIOperationType
+from ai_lead_manager.application.ai.money import Currency, Money
 from ai_lead_manager.application.ai.readiness import LiveAIReadinessService
 from ai_lead_manager.application.api_keys import APIKeyScope
 from ai_lead_manager.application.tenant_context import TenantContext
-from ai_lead_manager.domain.models import AIOperation, LeadAnalysis, ProviderCall, TenantAIPolicy
+from ai_lead_manager.domain.models import (
+    AIOperation,
+    Customer,
+    Lead,
+    LeadAnalysis,
+    Message,
+    ProviderCall,
+    TenantAIPolicy,
+)
 from ai_lead_manager.infrastructure.ai.composition import build_ai_executor
 from ai_lead_manager.infrastructure.ai.openai_compatible.credentials import (
     EnvironmentCredentialResolver,
@@ -19,6 +28,8 @@ from ai_lead_manager.infrastructure.ai.openai_compatible.credentials import (
 ROOT = Path(__file__).resolve().parents[1]
 POLZA_PROVIDER = "polza"
 POLZA_MODEL = "lead-structured-v1"
+QWEN_MODEL = "lead-structured-qwen-v1"
+QWEN_PRICING_PATH = ROOT / "config" / "polza-pricing-20260914-r2.json"
 
 
 def polza_runtime(
@@ -60,15 +71,24 @@ def polza_runtime(
     return settings, executor, created_clients
 
 
-def seed_polza_policy(session: Session, slug: str) -> tuple[uuid.UUID, uuid.UUID]:
+def seed_polza_policy(
+    session: Session,
+    slug: str,
+    *,
+    qualification_model: str = POLZA_MODEL,
+    max_output_tokens: int = 100,
+    max_attempts: int = 2,
+) -> tuple[uuid.UUID, uuid.UUID]:
     tenant_id, lead_id = seed_live_lead(
         session, slug=slug, budget_currency="RUB", monthly_limit=1_000_000_000
     )
     policy = session.get(TenantAIPolicy, tenant_id)
     policy.qualification_provider = POLZA_PROVIDER
-    policy.qualification_model = POLZA_MODEL
+    policy.qualification_model = qualification_model
     policy.draft_provider = POLZA_PROVIDER
     policy.draft_model = POLZA_MODEL
+    policy.max_output_tokens = max_output_tokens
+    policy.max_attempts = max_attempts
     session.commit()
     return tenant_id, lead_id
 
@@ -277,6 +297,63 @@ def test_polza_readiness_is_safe_ready_preview_with_rub_costs(session: Session) 
     assert result.estimated_max_cost.currency.value == "RUB"
     assert result.remaining_monthly_budget.currency.value == "RUB"
     assert marker not in serialized
+    assert created_clients == []
+    assert session.scalar(select(func.count()).select_from(AIOperation)) == 0
+    assert session.scalar(select(func.count()).select_from(ProviderCall)) == 0
+
+
+def test_qwen_readiness_uses_complete_request_estimate_and_400_output_limit(
+    session: Session,
+) -> None:
+    marker = "configured-placeholder"
+    settings, executor, created_clients = polza_runtime(
+        session,
+        {"POLZA_AI_API_KEY": marker},
+        ai_max_output_tokens=400,
+        ai_model_pricing_json=QWEN_PRICING_PATH.read_text(encoding="utf-8"),
+    )
+    tenant_id, lead_id = seed_polza_policy(
+        session,
+        "qwen-complete-request-estimate",
+        qualification_model=QWEN_MODEL,
+        max_output_tokens=400,
+        max_attempts=1,
+    )
+    lead = session.get(Lead, lead_id)
+    customer = session.get(Customer, lead.customer_id)
+    message = session.scalar(
+        select(Message).where(
+            Message.tenant_id == tenant_id,
+            Message.conversation_id == lead.conversation_id,
+            Message.direction == "inbound",
+        )
+    )
+    customer.name = "Алексей Смирнов"
+    customer.email = None
+    customer.phone = None
+    message.body = (
+        "Здравствуйте! Хотим автоматизировать обработку заявок с сайта и Telegram, "
+        "автоматически определять приоритет клиентов и передавать горячие заявки "
+        "менеджеру в CRM. Бюджет около 150 000 ₽. Планируем внедрение в ближайший "
+        "месяц и готовы созвониться на этой неделе."
+    )
+    session.commit()
+
+    result = LiveAIReadinessService(session, executor, settings).check(
+        TenantContext.trusted_context(tenant_id),
+        AIOperationType.QUALIFICATION,
+        lead_id,
+        frozenset({APIKeyScope.AI_QUALIFY}),
+    )
+
+    assert result.ready is True
+    assert result.estimated_input_tokens == 647
+    assert result.estimated_input_tokens >= 217
+    assert result.max_output_tokens == 400
+    assert result.estimated_max_cost == Money(
+        amount_micros=21_342, currency=Currency.RUB
+    )
+    assert result.estimated_max_cost.amount_micros < 1_000_000
     assert created_clients == []
     assert session.scalar(select(func.count()).select_from(AIOperation)) == 0
     assert session.scalar(select(func.count()).select_from(ProviderCall)) == 0

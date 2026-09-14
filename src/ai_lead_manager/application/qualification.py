@@ -121,6 +121,16 @@ class QualificationService:
                 estimated_input_tokens=bounded.estimated_tokens,
                 max_output_tokens=self.max_output_tokens,
             )
+            request = request.model_copy(
+                update={
+                    "estimated_input_tokens": self.ai_executor.estimate_input_tokens(
+                        AIOperationType.QUALIFICATION,
+                        route.provider,
+                        route.model,
+                        request,
+                    )
+                }
+            )
             request_hash = canonical_request_hash(
                 {
                     "lead_id": str(lead.id),
