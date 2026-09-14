@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Lead Manager</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: #f5f7fb; color: #172033; }
+    main { max-width: 760px; margin: 32px auto; padding: 0 16px 32px; }
+    section { background: #fff; border: 1px solid #dfe4ee; border-radius: 12px; padding: 20px; margin-top: 16px; }
+    h1, h2 { margin: 0 0 14px; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    label { display: grid; gap: 5px; font-weight: 600; font-size: .9rem; }
+    .wide { grid-column: 1 / -1; }
+    input, textarea, button { font: inherit; padding: 9px; border: 1px solid #bfc8d9; border-radius: 7px; }
+    textarea { min-height: 110px; resize: vertical; }
+    button { background: #2563eb; color: #fff; border: 0; cursor: pointer; font-weight: 700; }
+    button:disabled { opacity: .6; cursor: wait; }
+    #status { min-height: 1.4em; margin: 14px 0 0; }
+    .error { color: #b42318; } .success { color: #067647; }
+    .result-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .metric { background: #f7f9fc; border-radius: 8px; padding: 10px; }
+    .metric b { display: block; color: #5b6473; font-size: .8rem; margin-bottom: 3px; }
+    .temperature { font-size: 1.25rem; font-weight: 800; }
+    [hidden] { display: none; }
+    @media (max-width: 600px) { .grid, .result-grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>AI Lead Manager</h1>
+    <p>Создайте лид и получите квалификацию.</p>
+    <section>
+      <form id="lead-form">
+        <div class="grid">
+          <label class="wide">ID аккаунта<input id="tenant-id" name="tenant_id" required></label>
+          <label class="wide">API-ключ<input id="api-key" name="api_key" type="password" autocomplete="off" required></label>
+          <label>Имя<input id="name" name="name" required maxlength="200"></label>
+          <label>Эл. почта<input id="email" name="email" type="email"></label>
+          <label class="wide">Телефон<input id="phone" name="phone" maxlength="100"></label>
+          <label class="wide">Сообщение<textarea id="message" name="message" required maxlength="100000"></textarea></label>
+        </div>
+        <p><button id="submit" type="submit">Создать и квалифицировать</button></p>
+      </form>
+      <p id="status" aria-live="polite"></p>
+    </section>
+    <section id="result" hidden>
+      <h2>Результат квалификации</h2>
+      <div class="result-grid">
+        <div class="metric"><b>Категория</b><span class="temperature" data-field="temperature"></span></div>
+        <div class="metric"><b>Оценка</b><span data-field="score"></span></div>
+        <div class="metric"><b>Намерение</b><span data-field="intent"></span></div>
+        <div class="metric"><b>Бюджет</b><span data-field="budget"></span></div>
+        <div class="metric"><b>Срочность</b><span data-field="urgency"></span></div>
+        <div class="metric"><b>Готовность к решению</b><span data-field="decision_readiness"></span></div>
+        <div class="metric"><b>Уверенность</b><span data-field="confidence"></span></div>
+        <div class="metric"><b>Рекомендация</b><span data-field="next_action"></span></div>
+        <div class="metric"><b>Приоритет</b><span data-field="priority"></span></div>
+        <div class="metric wide"><b>Краткий вывод</b><span data-field="summary"></span></div>
+      </div>
+    </section>
+  </main>
+  <script>
+    const form = document.querySelector('#lead-form');
+    const button = document.querySelector('#submit');
+    const status = document.querySelector('#status');
+    const resultPanel = document.querySelector('#result');
+    const empty = '—';
+    const labels = {
+      category: { HOT: 'Горячий', WARM: 'Тёплый', COLD: 'Холодный' },
+      intent: {
+        purchase: 'Покупка',
+        exploration: 'Исследование',
+        support: 'Поддержка',
+        unknown: 'Не определено',
+      },
+      urgency: { high: 'Высокая', medium: 'Средняя', low: 'Низкая' },
+      decisionReadiness: {
+        ready: 'Готов',
+        considering: 'Рассматривает',
+        researching: 'Изучает',
+        not_ready: 'Не готов',
+      },
+      recommendation: {
+        schedule_call: 'Назначить звонок',
+        clarify_requirements: 'Уточнить требования',
+        collect_context: 'Собрать контекст',
+      },
+    };
+
+    function identifier(prefix) {
+      return `${prefix}-${crypto.randomUUID()}`;
+    }
+
+    async function jsonResponse(response) {
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.detail?.code || 'Не удалось выполнить запрос.');
+      }
+      return payload;
+    }
+
+    function setField(name, value) {
+      document.querySelector(`[data-field="${name}"]`).textContent = value ?? empty;
+    }
+
+    function displayValue(value, mapping) {
+      return mapping[value] ?? value ?? empty;
+    }
+
+    function formatBudget(amount, currency) {
+      if (amount === null || amount === undefined) return empty;
+      const value = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 }).format(amount);
+      return currency === 'RUB' ? `${value} ₽` : currency ? `${value} ${currency}` : value;
+    }
+
+    function formatConfidence(value) {
+      const numericValue = Number(value);
+      if (!Number.isFinite(numericValue)) return value ?? empty;
+      return new Intl.NumberFormat('ru-RU', { style: 'percent', maximumFractionDigits: 0 })
+        .format(numericValue);
+    }
+
+    function showResult(data) {
+      const analysis = data.analysis;
+      const action = data.next_best_action;
+      setField('temperature', displayValue(data.temperature, labels.category));
+      setField('score', data.score);
+      setField('intent', displayValue(analysis.intent, labels.intent));
+      setField('budget', formatBudget(analysis.budget_amount, analysis.budget_currency));
+      setField('urgency', displayValue(analysis.urgency, labels.urgency));
+      setField('decision_readiness', displayValue(analysis.decision_readiness, labels.decisionReadiness));
+      setField('confidence', formatConfidence(analysis.confidence));
+      setField('next_action', displayValue(action.action_type, labels.recommendation));
+      setField('priority', action.priority);
+      setField('summary', analysis.summary);
+      resultPanel.hidden = false;
+    }
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      resultPanel.hidden = true;
+      status.className = '';
+      status.textContent = 'Создаём лид и выполняем квалификацию…';
+      button.disabled = true;
+      const values = new FormData(form);
+      const tenantId = values.get('tenant_id').trim();
+      const apiKey = values.get('api_key').trim();
+      try {
+        const inbound = await jsonResponse(await fetch('/api/v1/inbound/http', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tenant_id: tenantId,
+            source: 'web-form',
+            external_event_id: identifier('browser-lead'),
+            external_thread_id: identifier('browser-thread'),
+            name: values.get('name').trim() || null,
+            email: values.get('email').trim() || null,
+            phone: values.get('phone').trim() || null,
+            message: values.get('message').trim()
+          })
+        }));
+        const qualification = await jsonResponse(await fetch(`/api/v1/leads/${inbound.lead_id}/qualify`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            'Idempotency-Key': identifier('browser-qualification')
+          },
+          body: JSON.stringify({ tenant_id: tenantId })
+        }));
+        showResult(qualification);
+        status.className = 'success';
+        status.textContent = 'Квалификация завершена.';
+      } catch (error) {
+        status.className = 'error';
+        status.textContent = `Ошибка: ${error.message}`;
+      } finally {
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
