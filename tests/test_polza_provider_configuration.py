@@ -5,7 +5,11 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
-from ai_lead_manager.application.ai.contracts import AIOperationType, AIUsage
+from ai_lead_manager.application.ai.contracts import (
+    AIOperationType,
+    AIUsage,
+    ProviderDisabledError,
+)
 from ai_lead_manager.application.ai.money import Currency, Money
 from ai_lead_manager.config import Settings
 from ai_lead_manager.infrastructure.ai.composition import (
@@ -31,7 +35,11 @@ from ai_lead_manager.infrastructure.ai.openai_compatible.transport import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 POLZA_CONFIGURATION_PATH = PROJECT_ROOT / "config" / "polza-provider.json"
 POLZA_PRICING_PATH = PROJECT_ROOT / "config" / "polza-pricing-20260912-r1.json"
+POLZA_COMBINED_PRICING_PATH = PROJECT_ROOT / "config" / "polza-pricing-20260914-r1.json"
 POLZA_PRICING_VERSION = "polza-gpt41mini-rub-20260912-r1"
+QWEN_MODEL_ALIAS = "lead-structured-qwen-v1"
+QWEN_UPSTREAM_MODEL = "qwen/qwen3-30b-a3b-instruct-2507"
+QWEN_PRICING_VERSION = "polza-qwen3-30ba3b-rub-20260914-r1"
 OFFLINE_TEST_SECRET = "offline-polza-registration-test-secret"
 
 
@@ -95,14 +103,41 @@ def test_polza_registers_existing_adapters_without_http() -> None:
         qualification = registry.get(
             "polza", "lead-structured-v1", AIOperationType.QUALIFICATION
         )
+        qwen_qualification = registry.get(
+            "polza", QWEN_MODEL_ALIAS, AIOperationType.QUALIFICATION
+        )
         draft = registry.get("polza", "lead-structured-v1", AIOperationType.DRAFT)
 
         assert isinstance(qualification, OpenAICompatibleQualificationProvider)
+        assert isinstance(qwen_qualification, OpenAICompatibleQualificationProvider)
         assert isinstance(draft, OpenAICompatibleDraftProvider)
         assert registry.route(
             AIOperationType.QUALIFICATION, "polza", "lead-structured-v1"
         ).pricing_version == POLZA_PRICING_VERSION
+        assert registry.route(
+            AIOperationType.QUALIFICATION, "polza", QWEN_MODEL_ALIAS
+        ).pricing_version == QWEN_PRICING_VERSION
         assert requests == []
+
+
+def test_polza_qwen_qualification_route_is_allowlisted_without_expanding_draft() -> None:
+    catalog = OpenAICompatibleProviderCatalog.from_json(polza_configuration_json())
+    resolved = catalog.resolve(
+        "polza", QWEN_MODEL_ALIAS, ProviderCapability.QUALIFICATION
+    )
+
+    assert resolved.provider.alias == "polza"
+    assert resolved.model.alias == QWEN_MODEL_ALIAS
+    assert resolved.model.upstream_model == QWEN_UPSTREAM_MODEL
+    assert resolved.model.provider_model_allowlist == {QWEN_UPSTREAM_MODEL}
+    assert resolved.model.pricing_version == QWEN_PRICING_VERSION
+    assert resolved.model.billing_currency is Currency.RUB
+    assert resolved.model.capabilities == {
+        ProviderCapability.QUALIFICATION,
+        ProviderCapability.STRICT_STRUCTURED_OUTPUT,
+    }
+    with pytest.raises(ProviderDisabledError):
+        catalog.resolve("polza", QWEN_MODEL_ALIAS, ProviderCapability.DRAFT)
 
 
 def test_polza_immutable_pricing_snapshot_matches_route_and_exact_rub_rates() -> None:
@@ -124,6 +159,32 @@ def test_polza_immutable_pricing_snapshot_matches_route_and_exact_rub_rates() ->
     assert price.actual_cost(AIUsage(input_tokens=0, output_tokens=1_000_000)) == Money(
         amount_micros=194_160_000, currency=Currency.RUB
     )
+
+
+def test_qwen_pricing_snapshot_is_conservative_exact_and_below_per_call_limit() -> None:
+    settings = Settings(
+        _env_file=None,
+        ai_model_pricing_json=POLZA_COMBINED_PRICING_PATH.read_text(encoding="utf-8"),
+    )
+    catalog = build_pricing_catalog(settings)
+    qwen = catalog.get("polza", QWEN_MODEL_ALIAS)
+    old = catalog.get("polza", "lead-structured-v1")
+    route = next(
+        model for model in polza_provider_config().models if model.alias == QWEN_MODEL_ALIAS
+    )
+
+    assert qwen.version == route.pricing_version == QWEN_PRICING_VERSION
+    assert qwen.currency is Currency.RUB
+    assert qwen.input_price_micros_per_million_tokens == 5_677_945
+    assert qwen.output_price_micros_per_million_tokens == 22_764_843
+    assert qwen.cached_price_micros_per_million_tokens == 5_677_945
+    assert qwen.worst_case_cost(114, 100, 1) == Money(
+        amount_micros=2_925, currency=Currency.RUB
+    )
+    assert qwen.worst_case_cost(1_000, 100, 1).amount_micros < 1_000_000
+    assert old.version == POLZA_PRICING_VERSION
+    assert old.input_price_micros_per_million_tokens == 48_540_000
+    assert old.output_price_micros_per_million_tokens == 194_160_000
 
 
 @pytest.mark.parametrize(

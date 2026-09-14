@@ -354,6 +354,14 @@ def test_qualification_request_and_result_are_strict_and_provider_neutral() -> N
     assert body["response_format"]["type"] == "json_schema"
     assert body["response_format"]["json_schema"]["strict"] is True
     assert body["response_format"]["json_schema"]["name"] == "structured_qualification_v1"
+    schema = body["response_format"]["json_schema"]["schema"]
+    assert set(schema["required"]) == set(schema["properties"])
+    assert schema["additionalProperties"] is False
+    for field in ("task", "budget_amount", "budget_currency", "deadline"):
+        assert {variant["type"] for variant in schema["properties"][field]["anyOf"]} >= {
+            "null"
+        }
+        assert "default" not in schema["properties"][field]
     assert body["messages"][0]["role"] == "system"
     assert body["messages"][1]["role"] == "user"
     assert provider.prompt_version in body["messages"][0]["content"]
@@ -365,6 +373,23 @@ def test_qualification_request_and_result_are_strict_and_provider_neutral() -> N
     assert result.metadata.provider_request_id == "req-offline-1"
     assert result.metadata.finish_reason == "stop"
     assert result.usage == AIUsage(input_tokens=31, output_tokens=17, cached_tokens=7)
+
+
+def test_qualification_structured_response_accepts_explicit_nulls() -> None:
+    output = qualification_output()
+    for field in ("task", "budget_amount", "budget_currency", "deadline"):
+        output[field] = None
+
+    provider = factory_with_handler(
+        lambda request: json_response(request, chat_payload(output))
+    ).qualification("local-compatible", "sales-structured")
+
+    result = provider.execute(qualification_request())
+
+    assert result.output["task"] is None
+    assert result.output["budget_amount"] is None
+    assert result.output["budget_currency"] is None
+    assert result.output["deadline"] is None
 
 
 def test_draft_request_returns_russian_draft_without_sending_it() -> None:

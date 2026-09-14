@@ -19,11 +19,11 @@ class StructuredQualification(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     intent: Literal["purchase", "exploration", "support", "unknown"]
-    task: str | None = Field(default=None, max_length=5_000)
+    task: str | None = Field(max_length=5_000)
     pain_points: list[Annotated[str, Field(max_length=2_000)]] = Field(max_length=20)
-    budget_amount: float | None = Field(default=None, ge=0)
-    budget_currency: str | None = Field(default=None, min_length=3, max_length=3)
-    deadline: str | None = Field(default=None, max_length=200)
+    budget_amount: float | None = Field(ge=0)
+    budget_currency: str | None = Field(min_length=3, max_length=3)
+    deadline: str | None = Field(max_length=200)
     objections: list[Annotated[str, Field(max_length=2_000)]] = Field(max_length=20)
     urgency: Literal["high", "medium", "low"]
     decision_readiness: Literal["ready", "considering", "researching"]

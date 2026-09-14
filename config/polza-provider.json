@@ -18,6 +18,19 @@
           "draft",
           "strict_structured_output"
         ]
+      },
+      {
+        "alias": "lead-structured-qwen-v1",
+        "upstream_model": "qwen/qwen3-30b-a3b-instruct-2507",
+        "accepted_provider_models": [
+          "qwen/qwen3-30b-a3b-instruct-2507"
+        ],
+        "pricing_version": "polza-qwen3-30ba3b-rub-20260914-r1",
+        "billing_currency": "RUB",
+        "capabilities": [
+          "qualification",
+          "strict_structured_output"
+        ]
       }
     ]
   }

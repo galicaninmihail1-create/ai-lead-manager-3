@@ -1,0 +1,20 @@
+[
+  {
+    "provider": "polza",
+    "model": "lead-structured-v1",
+    "version": "polza-gpt41mini-rub-20260912-r1",
+    "currency": "RUB",
+    "input_price_micros_per_million_tokens": 48540000,
+    "output_price_micros_per_million_tokens": 194160000,
+    "cached_price_micros_per_million_tokens": 48540000
+  },
+  {
+    "provider": "polza",
+    "model": "lead-structured-qwen-v1",
+    "version": "polza-qwen3-30ba3b-rub-20260914-r1",
+    "currency": "RUB",
+    "input_price_micros_per_million_tokens": 5677945,
+    "output_price_micros_per_million_tokens": 22764843,
+    "cached_price_micros_per_million_tokens": 5677945
+  }
+]
