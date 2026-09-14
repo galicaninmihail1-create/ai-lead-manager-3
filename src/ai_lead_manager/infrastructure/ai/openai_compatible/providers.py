@@ -44,6 +44,7 @@ class _OpenAICompatibleStructuredProvider:
         self.upstream_model = resolved.model.upstream_model
         self.provider_model_allowlist = resolved.model.provider_model_allowlist
         self.pricing_version = resolved.model.pricing_version
+        self.require_parameters = resolved.provider.require_parameters
         self.billing_currency = (
             resolved.model.billing_currency.value
             if resolved.model.billing_currency is not None
@@ -70,7 +71,7 @@ class _OpenAICompatibleStructuredProvider:
                 AIErrorKind.INVALID_REQUEST,
                 "AI request schema version does not match the provider adapter",
             )
-        return {
+        payload = {
             "max_tokens": request.max_output_tokens,
             "messages": prompt.as_messages(),
             "model": self.upstream_model,
@@ -84,6 +85,9 @@ class _OpenAICompatibleStructuredProvider:
             },
             "temperature": 0,
         }
+        if self.require_parameters:
+            payload["provider"] = {"require_parameters": True}
+        return payload
 
     def _validate_provider_model(
         self, result: StructuredAIResult

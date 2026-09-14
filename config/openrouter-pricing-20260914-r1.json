@@ -1,0 +1,11 @@
+[
+  {
+    "provider": "openrouter",
+    "model": "lead-structured-qwen-v1",
+    "version": "openrouter-qwen3-rub-ceiling-20260914-r1",
+    "currency": "RUB",
+    "input_price_micros_per_million_tokens": 100000000,
+    "output_price_micros_per_million_tokens": 100000000,
+    "cached_price_micros_per_million_tokens": 100000000
+  }
+]

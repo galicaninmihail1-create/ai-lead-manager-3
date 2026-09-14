@@ -62,6 +62,7 @@ class OpenAICompatibleProviderConfig(BaseModel):
     models: tuple[OpenAICompatibleModelConfig, ...] = Field(min_length=1)
     timeouts: OpenAIHTTPTimeoutConfig = Field(default_factory=OpenAIHTTPTimeoutConfig)
     chat_completions_path: str = Field(default="/v1/chat/completions", pattern=r"^/[A-Za-z0-9_./-]+$")
+    require_parameters: bool = False
     max_response_bytes: int = Field(default=1_000_000, ge=1_024, le=10_000_000)
     safe_retry_http_statuses: frozenset[int] = Field(default_factory=frozenset)
 
