@@ -56,8 +56,8 @@ from ai_lead_manager.infrastructure.ai.runtime import get_provider_registry
 TEST_SECRET = "stage5b1-test-credential-never-real"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OPENROUTER_CONFIGURATION_PATH = PROJECT_ROOT / "config" / "openrouter-provider.json"
-OPENROUTER_PRICING_PATH = PROJECT_ROOT / "config" / "openrouter-pricing-20260914-r1.json"
-OPENROUTER_QWEN_MODEL = "qwen/qwen3-30b-a3b-instruct-2507"
+OPENROUTER_PRICING_PATH = PROJECT_ROOT / "config" / "openrouter-pricing-20260914-gemini-r1.json"
+OPENROUTER_GEMINI_MODEL = "google/gemini-3-flash-preview"
 
 
 def model_config(
@@ -385,26 +385,26 @@ def test_qualification_request_and_result_are_strict_and_provider_neutral() -> N
     assert result.usage == AIUsage(input_tokens=31, output_tokens=17, cached_tokens=7)
 
 
-def test_openrouter_qwen_route_preserves_schema_and_maps_usage() -> None:
+def test_openrouter_gemini_route_preserves_schema_and_maps_usage() -> None:
     configuration = OpenAICompatibleProviderCatalog.from_json(
         OPENROUTER_CONFIGURATION_PATH.read_text(encoding="utf-8")
     )
     resolved = configuration.resolve(
-        "openrouter", "lead-structured-qwen-v1", ProviderCapability.QUALIFICATION
+        "openrouter", "lead-structured-gemini-v1", ProviderCapability.QUALIFICATION
     )
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         payload = chat_payload()
-        payload["model"] = OPENROUTER_QWEN_MODEL
+        payload["model"] = OPENROUTER_GEMINI_MODEL
         return json_response(request, payload)
 
     provider = factory_with_handler(
         handler,
         config=resolved.provider,
         credentials={"OPENROUTER_API_KEY": TEST_SECRET},
-    ).qualification("openrouter", "lead-structured-qwen-v1")
+    ).qualification("openrouter", "lead-structured-gemini-v1")
     result = provider.execute(qualification_request())
 
     assert len(requests) == 1
@@ -412,7 +412,7 @@ def test_openrouter_qwen_route_preserves_schema_and_maps_usage() -> None:
     assert str(request.url) == "https://openrouter.ai/api/v1/chat/completions"
     assert request.headers["authorization"] == f"Bearer {TEST_SECRET}"
     body = json.loads(request.content)
-    assert body["model"] == OPENROUTER_QWEN_MODEL
+    assert body["model"] == OPENROUTER_GEMINI_MODEL
     assert body["provider"] == {"require_parameters": True}
     assert body["response_format"]["type"] == "json_schema"
     assert body["response_format"]["json_schema"]["strict"] is True
@@ -421,22 +421,22 @@ def test_openrouter_qwen_route_preserves_schema_and_maps_usage() -> None:
     assert schema["additionalProperties"] is False
     assert result.usage == AIUsage(input_tokens=31, output_tokens=17, cached_tokens=7)
     assert result.metadata.provider == "openrouter"
-    assert result.metadata.model == "lead-structured-qwen-v1"
-    assert result.metadata.provider_model == OPENROUTER_QWEN_MODEL
+    assert result.metadata.model == "lead-structured-gemini-v1"
+    assert result.metadata.provider_model == OPENROUTER_GEMINI_MODEL
 
 
-def test_openrouter_static_rub_ceiling_is_available_for_qwen_budget_guard() -> None:
+def test_openrouter_static_rub_ceiling_is_available_for_gemini_budget_guard() -> None:
     pricing = build_pricing_catalog(
         Settings(
             _env_file=None,
             ai_model_pricing_json=OPENROUTER_PRICING_PATH.read_text(encoding="utf-8"),
         )
-    ).get("openrouter", "lead-structured-qwen-v1")
+    ).get("openrouter", "lead-structured-gemini-v1")
 
-    assert pricing.version == "openrouter-qwen3-rub-ceiling-20260914-r1"
+    assert pricing.version == "openrouter-gemini3flash-rub-ceiling-20260914-r1"
     assert pricing.currency is Currency.RUB
     assert pricing.worst_case_cost(647, 400, 1) == Money(
-        amount_micros=104_700, currency=Currency.RUB
+        amount_micros=561_750, currency=Currency.RUB
     )
 
 

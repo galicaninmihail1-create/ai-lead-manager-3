@@ -13,12 +13,12 @@
     },
     "models": [
       {
-        "alias": "lead-structured-qwen-v1",
-        "upstream_model": "qwen/qwen3-30b-a3b-instruct-2507",
+        "alias": "lead-structured-gemini-v1",
+        "upstream_model": "google/gemini-3-flash-preview",
         "accepted_provider_models": [
-          "qwen/qwen3-30b-a3b-instruct-2507"
+          "google/gemini-3-flash-preview"
         ],
-        "pricing_version": "openrouter-qwen3-rub-ceiling-20260914-r1",
+        "pricing_version": "openrouter-gemini3flash-rub-ceiling-20260914-r1",
         "billing_currency": "RUB",
         "capabilities": [
           "qualification",

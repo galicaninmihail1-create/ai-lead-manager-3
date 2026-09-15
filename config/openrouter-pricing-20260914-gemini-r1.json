@@ -1,0 +1,11 @@
+[
+  {
+    "provider": "openrouter",
+    "model": "lead-structured-gemini-v1",
+    "version": "openrouter-gemini3flash-rub-ceiling-20260914-r1",
+    "currency": "RUB",
+    "input_price_micros_per_million_tokens": 250000000,
+    "output_price_micros_per_million_tokens": 1000000000,
+    "cached_price_micros_per_million_tokens": 250000000
+  }
+]
