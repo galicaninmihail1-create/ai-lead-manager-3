@@ -224,3 +224,5 @@ RUN_POSTGRES_TESTS=1 pytest
 ```
 
 Все AI-тесты используют recording provider без HTTP transport и не требуют credentials.
+
+какашке
