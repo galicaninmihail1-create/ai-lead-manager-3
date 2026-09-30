@@ -202,6 +202,7 @@ python -m venv .venv
 pip install -e ".[dev]"
 Copy-Item .env.example .env
 alembic upgrade head
+
 uvicorn ai_lead_manager.main:app --reload
 ```
 
