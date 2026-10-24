@@ -10,6 +10,7 @@ OpenAI-compatible qualification/draft adapters в безопасный AI execut
 - `application` — сценарии использования, схемы и repository-порты;
 - `infrastructure` — PostgreSQL/SQLAlchemy и реализации репозиториев;
 - `api` — HTTP transport на FastAPI.
+- 
 
 Модуль `application/ai` владеет provider-neutral контрактами, pricing, idempotency,
 spending guard, retry-решениями и circuit breaker. `infrastructure/ai` содержит
