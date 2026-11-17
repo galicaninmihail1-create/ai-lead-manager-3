@@ -1,4 +1,4 @@
-# AI Lead Manager 3.0 тырыкъпфъ
+# AI Lead Manager 3.0 
 Технический фундамент multi-tenant AI Sales Operator. Stage 5B-2 интегрирует
 OpenAI-compatible qualification/draft adapters в безопасный AI executor. Режим по умолчанию
 остаётся полностью локальным `MOCK`; реальных AI-вызовов, credentials в репозитории,
