@@ -1,4 +1,4 @@
-# AI Lead Manager 3.0  рак
+# AI Lead Manager 3.0  рака
 
 Технический фундамент multi-tenant AI Sales Operator. Stage 5B-2 интегрирует
 OpenAI-compatible qualification/draft adapters в безопасный AI executor. Режим по умолчанию
